@@ -2423,11 +2423,13 @@ class EHLSolver:
         self.rotation_matrix = RotationMatrix(
             self.U, self.normal, self.meshin.meshF, degree=1
         )
-        self.rotation_matrix.load("rotation_matrix.npy")
+        self.rotation_matrix.load(os.path.join("data", "input", "rotation_matrix.npy"))
         self.rotation_inverse = RotationMatrixInverse(
             self.rotation_matrix, self.meshin.meshF, degree=1
         )
-        self.rotation_inverse.load("rotation_matrix_inverse.npy")
+        self.rotation_inverse.load(
+            os.path.join("data", "input", "rotation_matrix_inverse.npy")
+        )
         self.R = self.rotation_matrix.R_function
         self.R_inv = self.rotation_inverse.R_inv_function
 
