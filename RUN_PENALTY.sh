@@ -11,6 +11,12 @@ read_configPenalty
 # ---------------------------------------------------------------------------
 CASE_ID="$OUTPUT_DIR"
 CASES_BASE_DIR="${HMM_CASES_BASE_DIR:-/data/output/cases}"
+
+if [[ "$CASES_BASE_DIR" == /data/* ]] && ! mountpoint -q /data; then
+  CASES_BASE_DIR="$(pwd)/data/output/cases"
+  echo "WARNING: /data not mounted; writing cases to $CASES_BASE_DIR instead."
+fi
+
 CASE_ROOT="${CASES_BASE_DIR}/${CASE_ID}"
 RUN_ROOT="${CASE_ROOT}/run"
 EXCHANGE_DIR="${RUN_ROOT}/exchange"
