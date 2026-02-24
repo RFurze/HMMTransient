@@ -148,17 +148,19 @@ def main(argv: list[str] | None = None) -> None:
     solver.load_state(p_last_T, deform_last_T, h=h_last_T, time=T, dt=DT)
 
     # Choose initial guesses for the nonlinear solve.
-    if c_iter == 1:
-        p_guess = p_last_T
-        deform_guess = deform_last_T
-        h_guess = h_last_T
-        print("Initial guess source: last converged transient step")
-    else:
-        p_guess = np.load(output_dir / "p_init.npy")
-        deform_guess = np.load(output_dir / "def_init.npy")
-        h_guess = np.load(output_dir / "h_init.npy")
-        print("Initial guess source: previous coupling iteration in current load-balance")
-
+    # if c_iter == 1:
+    #     p_guess = p_last_T
+    #     deform_guess = deform_last_T
+    #     h_guess = h_last_T
+    #     print("Initial guess source: last converged transient step")
+    # else:
+    #     p_guess = np.load(output_dir / "p_init.npy")
+    #     deform_guess = np.load(output_dir / "def_init.npy")
+    #     h_guess = np.load(output_dir / "h_init.npy")
+    #     print("Initial guess source: previous coupling iteration in current load-balance")
+    p_guess = p_last_T
+    deform_guess = deform_last_T
+    h_guess = h_last_T
     solver.p.vector()[:] = p_guess
     solver.delta.vector()[:] = deform_guess
     solver.h.vector()[:] = h_guess

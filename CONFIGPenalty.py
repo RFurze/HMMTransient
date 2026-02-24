@@ -24,7 +24,7 @@ from config.dataclasses import (
 # Runtime configuration
 # ------------------------------------------------------------------
 runtime = RuntimeSettings(
-    OUTPUT_DIR="PenaltyDebug9",
+    OUTPUT_DIR="TestNewCode",
     MAX_LB_ITERS=20,
     MAX_COUPLING_ITERS=20,
     TEND=4.00,
@@ -47,7 +47,7 @@ material = MaterialParams(
     eccentricity0=[0.0, 0.0, 0.9950523437], #0.9541235992
     E=105e9,
     nu=0.3,
-    k_spring=5e13,
+    k_spring=5e14,
 )
 
 ideal_film_thickness = FilmThicknessParams(
@@ -133,7 +133,7 @@ micro_physical = MicroPhysicalParams(
     beta_fraction=0.05,
     xmax=7.5e-5,
     ymax=7.5e-5,
-    k_spring=5e13,
+    k_spring=5e14,
 )
 
 micro_solver = MicroSolverSettings(

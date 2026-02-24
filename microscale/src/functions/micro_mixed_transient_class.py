@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import numpy as np
-from dolfin import *  # legacy FEniCS
+from fenics import *  # legacy FEniCS
 parameters["form_compiler"]["quadrature_degree"] = 4
 set_log_level(LogLevel.ERROR)
 set_log_active(False)
@@ -108,6 +108,11 @@ class MicroSolverSettings:
     eps_solid: float     # small mobility in contact to avoid singularity
     eps_smooth: float    # smoothing for smooth_pos
     print_progress: bool
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    """Parse a boolean-ish environment variable."""
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "y")
 
 
 # -------------------------------------------------------------------
@@ -213,6 +218,10 @@ class MicroMixedSolver:
         self._xdmf_Pmasked: Optional[XDMFFile] = None
         self._xdmf_M: Optional[XDMFFile] = None
         self._export_xdmf_series: bool = False
+
+        # Diagnostics can be expensive due to extra projections.
+        # Keep off by default; enable with MICRO_DIAGNOSTICS=1.
+        self._diagnostics_enabled: bool = _env_flag("MICRO_DIAGNOSTICS", "0")
 
     def _setup_coordinates(self) -> None:
         self.x, self.y = SpatialCoordinate(self.mesh_m)
@@ -446,8 +455,19 @@ class MicroMixedSolver:
         self.mask_hist_nm2 = Function(self.Vper, name="mask_nm2")
         self._have_two_hist = False
 
-        # Build baseline (steady) residual/Jacobian
-        self._build_forms(include_transient_terms=False, dt_nd=None)
+        # --- Transient controls as Constants so we do NOT rebuild UFL forms per step ---
+        # dt in nondimensional time units
+        self.dt_nd_const = Constant(1.0)
+        # BDF coefficients a0,a1,a2 for dh/dt ≈ (a0 h^n + a1 h^{n-1} + a2 h^{n-2})/dt
+        # (For backward Euler, set a2=0.)
+        self.bdf_a0 = Constant(0.0)
+        self.bdf_a1 = Constant(0.0)
+        self.bdf_a2 = Constant(0.0)
+        # Switch to enable/disable transient squeeze term without changing form structure
+        self.transient_on = Constant(0.0)
+
+        # Build baseline residual/Jacobian once (transient term present but disabled)
+        self._build_forms(include_transient_terms=True, dt_nd=None)
 
     def _build_forms(self, *, include_transient_terms: bool, dt_nd: float | None) -> None:
         """(Re)build residual/Jacobian for steady or transient solves."""
@@ -462,16 +482,15 @@ class MicroMixedSolver:
 
         R = R_reynolds + R_cav
 
-        if include_transient_terms and dt_nd is not None and dt_nd > 0.0:
-            if self._have_two_hist:
-                alf0, alf1, alf2 = (1.5, -2.0, 0.5)
-                R += (alf0 / dt_nd) * self.mask * self.h_nd * self.v * dx
-                R += (alf1 / dt_nd) * self.mask_hist_nm1 * self.h_hist_nm1 * self.v * dx
-                R += (alf2 / dt_nd) * self.mask_hist_nm2 * self.h_hist_nm2 * self.v * dx
-            else:
-                alf0, alf1 = (1.0, -1.0)
-                R += (alf0 / dt_nd) * self.mask * self.h_nd * self.v * dx
-                R += (alf1 / dt_nd) * self.mask_hist_nm1 * self.h_hist_nm1 * self.v * dx
+        # NOTE: Keep the transient term in the UFL graph permanently (when requested),
+        # but multiply by `self.transient_on` so we can toggle it at runtime (no rebuild).
+        if include_transient_terms:
+            dh_dt = (
+                self.bdf_a0 * self.h_nd
+                + self.bdf_a1 * self.h_hist_nm1
+                + self.bdf_a2 * self.h_hist_nm2
+            ) / self.dt_nd_const
+            R += self.transient_on * (self.mask * dh_dt * self.v * dx)
 
         self.R = R
         self.J = derivative(self.R, self.w, self.dw)
@@ -657,14 +676,19 @@ class MicroMixedSolver:
         except Exception:
             return False
 
-    def _cell_avg_pressure_dim(self) -> float:
-        """Cell-average dimensional pressure (Pa)."""
-        # Using cached area avoids repeated assemble(1*dx).
-        area = getattr(self, "_area_total", None)
-        if area is None or area <= 0.0:
-            area = 1.0
-            self._area_total = area
-        return float(assemble(self.P_dim * dx(domain=self.mesh_m)) / area)
+    # def _cell_avg_pressure_dim(self) -> float:
+    #     """Cell-average dimensional pressure (Pa)."""
+    #     # Using cached area avoids repeated assemble(1*dx).
+    #     area = getattr(self, "_area_total", None)
+    #     if area is None or area <= 0.0:
+    #         area = 1.0
+    #         self._area_total = area
+    #     return float(assemble(self.P_dim * dx(domain=self.mesh_m)) / area)
+
+    def _cell_avg_positive_pressure_dim(self) -> float:
+        Ppos = conditional(gt(self.P_dim, Constant(0.0)), self.P_dim, Constant(0.0))
+        area = getattr(self, "_area_total", 1.0)
+        return float(assemble(Ppos * dx(domain=self.mesh_m)) / area)
 
     def _target_hd_nd_from_Pst(self, Pst_dim: float) -> float:
         """Return nondimensional deflection hd/H0 from cell-avg pressure, using stiffness k_spring (Pa/m)."""
@@ -689,9 +713,12 @@ class MicroMixedSolver:
         prm["newton_solver"]["relative_tolerance"] = self.settings.rel_tolerance
         prm["newton_solver"]["maximum_iterations"] = self.settings.max_iterations
         prm["newton_solver"]["report"] = self.settings.print_progress
-        prm["newton_solver"]["error_on_nonconvergence"] = False
+        prm["newton_solver"]["error_on_nonconvergence"] = True
         prm["newton_solver"]["relaxation_parameter"] = self.settings.relaxation_parameter
         prm["newton_solver"]["linear_solver"] = "mumps"
+
+        # prm["newton_solver"]["linear_solver"] = "gmres"
+        # prm["newton_solver"]["preconditioner"] = "ilu"
 
         self._solver_needs_rebuild = False
 
@@ -701,12 +728,15 @@ class MicroMixedSolver:
             self._build_nonlinear_solver()
 
         # Keep a clean initial guess (matches previous behaviour)
-        self.w.vector().zero()
+        # self.w.vector().zero()
         self._nls_solver.solve()
 
 
     def run_steady(self) -> None:
         """Run a single steady-state solve (alias used by the microscale runner)."""
+        # Ensure transient squeeze term is disabled for steady solves.
+        if hasattr(self, "transient_on"):
+            self.transient_on.assign(0.0)
         self.solve()
 
 
@@ -720,6 +750,13 @@ class MicroMixedSolver:
         dt_dim = Tf / (n_steps - 1)
         dt_nd = dt_dim / self.t0
 
+        # Configure XDMF output cadence: at most ~20 writes across the run.
+        # If n_steps <= 20, write every step.
+        if n_steps <= 20:
+            export_stride = 1
+        else:
+            export_stride = int(np.ceil((n_steps - 1) / 20.0))
+
         # Initialise at t=0
         self.T_nd_const.assign(0.0)
         self.T_dim_const.assign(0.0)
@@ -731,30 +768,26 @@ class MicroMixedSolver:
             # Write initial fields at t=0
             self._write_xdmf_step(t_dim=0.0)
 
-            # Diagnostics at t=0 (computed on DG0 so min() is meaningful).
-            try:
-                Vdg0 = FunctionSpace(self.mesh_m, "DG", 0)
-                phi0_proj = project(self.h_nd - Constant(self.hmin_nd), Vdg0)
-                mask0_proj = project(self.mask, Vdg0)
+            # Optional diagnostics at t=0 (extra projections can be expensive)
+            if self._diagnostics_enabled:
+                try:
+                    phi0_proj = project(self.h_nd - Constant(self.hmin_nd), self.Vdg0)
+                    mask0_proj = project(self.mask, self.Vdg0)
 
-                phi0_local = float(phi0_proj.vector().get_local().min())
-                mask0_local = float(mask0_proj.vector().get_local().min())
+                    phi0_local = float(phi0_proj.vector().get_local().min())
+                    mask0_local = float(mask0_proj.vector().get_local().min())
 
-                phi0 = MPI.min(MPI.comm_world, phi0_local)
-                mask0 = MPI.min(MPI.comm_world, mask0_local)
+                    phi0 = MPI.min(MPI.comm_world, phi0_local)
+                    mask0 = MPI.min(MPI.comm_world, mask0_local)
 
-                # print(
-                #     f"[Transient step 0/{n_steps-1}] t=0.000000e+00 s | "
-                #     f"min(h_nd - hmin_nd)={phi0:.6e} | min(mask)={mask0:.6e}"
-                # )
-                # sys.stdout.flush()
-            except Exception as e:
-                print(f"[Transient step 0/{n_steps-1}] diagnostics failed: {e}")
-                sys.stdout.flush()
-                sys.stdout.flush()
-            except Exception as _e:
-
-                sys.stdout.flush()
+                    print(
+                        f"[Transient step 0/{n_steps-1}] t=0.000000e+00 s | "
+                        f"min(h_nd - hmin_nd)={phi0:.6e} | min(mask)={mask0:.6e}"
+                    )
+                    sys.stdout.flush()
+                except Exception as e:
+                    print(f"[Transient step 0/{n_steps-1}] diagnostics failed: {e}")
+                    sys.stdout.flush()
 
         h0 = project(self.h_nd, self.Vper)
         m0 = project(self.mask, self.Vper)
@@ -764,6 +797,14 @@ class MicroMixedSolver:
         self.mask_hist_nm2.assign(m0)
         self._have_two_hist = False
 
+        # Enable transient term now that histories exist (no form rebuild needed)
+        self.dt_nd_const.assign(float(dt_nd))
+        self.transient_on.assign(1.0)
+        # Backward Euler coefficients for the first transient step
+        self.bdf_a0.assign(1.0)
+        self.bdf_a1.assign(-1.0)
+        self.bdf_a2.assign(0.0)
+
         for step in range(1, n_steps):
             t_dim = step * dt_dim
             t_nd = t_dim / self.t0
@@ -771,54 +812,105 @@ class MicroMixedSolver:
             self.T_dim_const.assign(t_dim)
 
             self._update_pinned_bc(t_dim=t_dim)
-            self._build_forms(include_transient_terms=True, dt_nd=dt_nd)
+
+            # Switch coefficients to BDF2 once we have two history states.
+            # (Step 1 uses backward Euler; step>=2 uses BDF2.)
+            use_bdf2 = bool(step >= 2)
+            self._have_two_hist = use_bdf2
+
+            if use_bdf2:
+                self.bdf_a0.assign(1.5)
+                self.bdf_a1.assign(-2.0)
+                self.bdf_a2.assign(0.5)
+            else:
+                self.bdf_a0.assign(1.0)
+                self.bdf_a1.assign(-1.0)
+                self.bdf_a2.assign(0.0)
+            # --- Solve with optional spring-film coupling ---
             # --- Solve with optional spring-film coupling ---
             if self._spring_enabled():
                 hd_old = float(self.hd_nd_const)
+                
+                # Start with a very conservative initial relaxation factor for the first iteration
+                # (You can expose this as a setting if you want, e.g., self.settings.initial_omega)
+                omega = 0.05 
+                r_old = 0.0
+                
                 for _it in range(int(self.spring_max_iter)):
                     self.solve()
-                    Pst_dim = self._cell_avg_pressure_dim()
+                    # Pst_dim = self._cell_avg_pressure_dim()
+                    Pst_dim = self._cell_avg_positive_pressure_dim()
                     hd_tgt = self._target_hd_nd_from_Pst(Pst_dim)
 
-                    # Relaxed update (stabilises the fixed-point iteration)
-                    hd_new = (1.0 - float(self.spring_relax)) * hd_old + float(self.spring_relax) * hd_tgt
+                    # Calculate the current residual (difference between predicted target and current state)
+                    r_curr = hd_tgt - hd_old
+
+                    # Update the relaxation parameter using Aitken's delta-squared process
+                    # We skip the very first iteration (_it == 0) because we need history
+                    if _it > 0:
+                        diff = r_curr - r_old
+                        if abs(diff) > 1e-14:  # Safety check to prevent division by zero
+                            # Aitken update formula for scalar sequences
+                            omega = -omega * (r_old / diff)
+                        
+                        # Clamp omega to maintain stability
+                        # 0.01 prevents the solver from stalling completely
+                        # 1.0 prevents it from overshooting like it did previously
+                        omega = max(0.01, min(0.2, omega))
+
+                    # Apply the dynamically relaxed update
+                    hd_new = hd_old + omega * r_curr
+                    
+                    # --- Real-Time Diagnostics ---
+                    # Only print if we are actually taking multiple iterations to converge
+                    # if int(self.spring_max_iter) > 1:
+                    #     print(f"  -> Spring Iter {_it:02d}: omega = {omega:.4f} | residual = {r_curr:.2e} | hd = {hd_new:.4e}")
+                    #     sys.stdout.flush()
+                    # -----------------------------
+
                     self.hd_nd_const.assign(hd_new)
 
-                    # Convergence based on deflection change
+                    # Convergence check based on the actual applied displacement
+
+                    # Convergence check based on the actual applied displacement
                     denom = 1.0 + abs(hd_old)
                     if abs(hd_new - hd_old) <= float(self.spring_rtol) * denom:
-                        hd_old = hd_new
                         break
+
+                    # Store state for the next iteration's Aitken calculation
                     hd_old = hd_new
-                # Final consistent solve with converged hd
+                    r_old = r_curr
+
+                # Final consistent solve with the converged hd
                 self.solve()
             else:
                 self.solve()
 
-            # Diagnostics: check masking activation (computed on DG0 so min() is meaningful).
-            try:
-                Vdg0 = FunctionSpace(self.mesh_m, "DG", 0)
-                phi_proj = project(self.h_nd - Constant(self.hmin_nd), Vdg0)
-                mask_proj = project(self.mask, Vdg0)
+            # Optional diagnostics: check masking activation (extra projections)
+            if self._diagnostics_enabled:
+                try:
+                    phi_proj = project(self.h_nd - Constant(self.hmin_nd), self.Vdg0)
+                    mask_proj = project(self.mask, self.Vdg0)
 
-                phi_min_local = float(phi_proj.vector().get_local().min())
-                mask_min_local = float(mask_proj.vector().get_local().min())
+                    phi_min_local = float(phi_proj.vector().get_local().min())
+                    mask_min_local = float(mask_proj.vector().get_local().min())
 
-                phi_min = MPI.min(MPI.comm_world, phi_min_local)
-                mask_min = MPI.min(MPI.comm_world, mask_min_local)
+                    phi_min = MPI.min(MPI.comm_world, phi_min_local)
+                    mask_min = MPI.min(MPI.comm_world, mask_min_local)
 
-                # print(
-                #     f"[Transient step {step}/{n_steps-1}] t={t_dim:.6e} s | "
-                #     f"min(h_nd - hmin_nd)={phi_min:.6e} | min(mask)={mask_min:.6e}"
-                # )
-                sys.stdout.flush()
-            except Exception as e:
-                print(f"[Transient step {step}/{n_steps-1}] diagnostics failed: {e}")
-                sys.stdout.flush()
+                    print(
+                        f"[Transient step {step}/{n_steps-1}] t={t_dim:.6e} s | "
+                        f"min(h_nd - hmin_nd)={phi_min:.6e} | min(mask)={mask_min:.6e}"
+                    )
+                    sys.stdout.flush()
+                except Exception as e:
+                    print(f"[Transient step {step}/{n_steps-1}] diagnostics failed: {e}")
+                    sys.stdout.flush()
 
-            # Time-series export
+            # Time-series export (throttled to at most ~20 writes over the whole run)
             if self._export_xdmf_series:
-                self._write_xdmf_step(t_dim=t_dim)
+                if (step % export_stride) == 0 or step == (n_steps - 1):
+                    self._write_xdmf_step(t_dim=t_dim)
 
             # Update histories
             h_curr = project(self.h_nd, self.Vper)
@@ -828,8 +920,8 @@ class MicroMixedSolver:
             self.h_hist_nm1.assign(h_curr)
             self.mask_hist_nm1.assign(m_curr)
 
-            if step >= 2:
-                self._have_two_hist = True
+            # _have_two_hist is now set at the start of the step when choosing
+            # BDF coefficients.
 
         # Close XDMF writers (keeps .xdmf/.h5 consistent on disk)
         if self._export_xdmf_series:
@@ -1015,7 +1107,7 @@ def q_re(transient, H, P, Ux, Uy, gradpx, gradpy, Pst, Hdot=None, Pdot=None, dt=
         Pdt = P
 
     eta = roelands(Pst)
-    print(f'Qx1@ {Ux * Hdt}, Qx2@ {- (Hdt**3) * gradpx / (12 * eta)}')
+    # print(f'Qx1@ {Ux * Hdt}, Qx2@ {- (Hdt**3) * gradpx / (12 * eta)}')
     qx = Ux * Hdt - (Hdt**3) * gradpx / (12 * eta)
     qy = Uy *Hdt -(Hdt**3) * gradpy / (12 * eta)
     Pst = P
@@ -1063,7 +1155,7 @@ def main() -> None:
     mesh_h = UnitSquareMesh(n_h, n_h)
 
     inputtask = 9665
-    tasks = np.load("backup/PenaltyDebug6/tasks.npy", allow_pickle=True)
+    tasks = np.load("data/input/MLSCheck/tasks.npy", allow_pickle=True)
     print(f'Shape tasks: {np.shape(tasks)}')
     (task_id, row_idx, H, P, Ux, Uy, _, gradp1, gradp2, _, Hdot, Pdot) = tasks[inputtask,:]
     print(f'Task {inputtask}: {tasks[inputtask,:]}')
@@ -1088,7 +1180,7 @@ def main() -> None:
             sys.stdout.flush()
 
         # return UFL expression (this is what the solver needs)
-        return H0 + HT * T + 0.5 * Ah * (cos(kx * 2 * pi * x_d / xmax) + cos(ky * 2 * pi * y_d / ymax))
+        return H0 + HT * T + 0.5 * Ah * (cos(kx * 2 * pi * (x_d + T * Ux) / xmax) + cos(ky * 2 * pi * (y_d + Uy*T) / ymax))
     
     # params = MicroPhysicalParameters(
     #     Ux=0.02,
@@ -1115,7 +1207,7 @@ def main() -> None:
         Uy=Uy,
         eta0=micro_physical.eta0,
         rho0=micro_physical.rho0,
-        penalty_gamma=getattr(micro_physical, "penalty_gamma", 1e4),
+        penalty_gamma=getattr(micro_physical, "penalty_gamma", 1e8),
         xmax=micro_physical.xmax,
         ymax=micro_physical.ymax,
         p0=P,
@@ -1142,10 +1234,10 @@ def main() -> None:
 
     import time
     start = time.time()
-    out_dir = "./data/output/mixed_micro/"
+    out_dir = "./data/output/mixed_micro6/"
     solver = MicroMixedSolver(mesh_m, mesh_h, params, settings, 1, ht, export_vtk=True, output_dir=out_dir, auto_solve=False)
     # solver.solve()
-    solver.run(Tf=params.Tend, n_steps = 8)
+    solver.run(Tf=params.Tend, n_steps = 300)
     # solver.post_process()
     print(f'Compute time = {time.time() - start}')
 

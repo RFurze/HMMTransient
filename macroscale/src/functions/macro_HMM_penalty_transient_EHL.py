@@ -2468,8 +2468,7 @@ class EHLSolver:
 
         # nondimensionalise the result
         Q0 = (
-            self.material_properties.rho0
-            * self.material_properties.c**3
+            self.material_properties.c**3
             * self.material_properties.p0
             / (12.0 * self.material_properties.eta0 * self.material_properties.Rc)
         )
