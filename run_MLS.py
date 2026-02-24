@@ -19,7 +19,7 @@ from CONFIGPenalty import MLS_THETA, MLS_DEGREE
 import numpy as np
 from mpi4py import MPI
 from mpi4py.futures import MPIPoolExecutor
-from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
 
 rank = MPI.COMM_WORLD.Get_rank()
 size = MPI.COMM_WORLD.Get_size()
@@ -150,10 +150,27 @@ def process_prediction(
     # ---------- distribute training data to workers --------------------------------
     ensure_all_workers_update(pool, Y_train, Mat_train, theta)
 
-    # ---------- KD-tree & neighbour search -----------------------------------------
-    tree = cKDTree(X_train)
-    dist_all, idx_all = tree.query(Xi, k=k_neighbors, workers=-1)
-    print("[root] KD-tree neighbour search done", flush=True)
+    # ---------- Mahalanobis neighbour search ---------------------------------------
+    centered = X_train - X_train.mean(axis=0)
+    if X_train.shape[0] < 2:
+        cov = np.eye(X_train.shape[1])
+    else:
+        cov = np.cov(centered, rowvar=False)
+        if cov.ndim == 0:
+            cov = np.array([[float(cov)]])
+    cov += 1e-10 * np.eye(cov.shape[0])
+    cov_inv = np.linalg.pinv(cov)
+
+    dmat = cdist(Xi, X_train, metric="mahalanobis", VI=cov_inv)
+    k_use = min(k_neighbors, X_train.shape[0])
+    if k_use < 1:
+        raise ValueError("No training points available for MLS prediction.")
+    idx_all = np.argpartition(dmat, kth=k_use - 1, axis=1)[:, :k_use]
+    dist_all = np.take_along_axis(dmat, idx_all, axis=1)
+    ord_local = np.argsort(dist_all, axis=1)
+    idx_all = np.take_along_axis(idx_all, ord_local, axis=1)
+    dist_all = np.take_along_axis(dist_all, ord_local, axis=1)
+    print("[root] Mahalanobis neighbour search done", flush=True)
 
     # -----------------------------------------------------------------------------
     # Fire off batches

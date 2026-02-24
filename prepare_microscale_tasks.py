@@ -32,10 +32,11 @@ def main():
         DT = args.DT
         step_idx = int(round(T / DT)) if DT != 0 else int(T)
         prefix = f"transient_step{step_idx}_"
-        existing_file = f"{prefix}existing_xi_d.npy"
+        existing_file = "transient_existing_xi_d.npy"
         init_cond = lb_iter == 0 and c_iter == 1
         if not os.path.exists(os.path.join(output_dir, existing_file)):
-            init_cond = True
+            legacy_file = os.path.join(output_dir, f"{prefix}existing_xi_d.npy")
+            init_cond = not os.path.exists(legacy_file)
         print(
             f"Starting build_task_list.py for T = {T}, lb_iter={lb_iter}, c_iter={c_iter}"
         )
@@ -55,7 +56,11 @@ def main():
         tasks, xi_d = metamodel.build(xi_rot, order, init=True, theta=theta)
         existing_xi_d = xi_d.copy()
     else:
-        existing_xi_d = np.load(os.path.join(output_dir, existing_file))
+        existing_path = os.path.join(output_dir, existing_file)
+        if not os.path.exists(existing_path) and args.transient:
+            legacy_path = os.path.join(output_dir, f"{prefix}existing_xi_d.npy")
+            existing_path = legacy_path if os.path.exists(legacy_path) else existing_path
+        existing_xi_d = np.load(existing_path)
         metamodel.existing_xi_d = existing_xi_d
         tasks, xi_d = metamodel.build(xi_rot, None, init=False, theta=theta)
         existing_xi_d = np.concatenate((existing_xi_d, xi_d), axis=1)

@@ -91,7 +91,7 @@ def main():
         )
 
         step_idx = int(round(T / DT)) if DT != 0 else int(T)
-        prefix = f"transient_step{step_idx}_"
+        prefix = "transient_"
         print(
             f"Starting build_task_list.py for T={T}, lb_iter={lb_iter}, c_iter={c_iter}"
         )
@@ -118,7 +118,12 @@ def main():
         name: np.load(os.path.join(output_dir, fname))
         for name, fname in result_files.items()
     }
-    existing_xi_d = np.load(os.path.join(output_dir, f"{prefix}existing_xi_d.npy"))
+    xi_path = os.path.join(output_dir, f"{prefix}existing_xi_d.npy")
+    if transient and not os.path.exists(xi_path):
+        legacy = os.path.join(output_dir, f"transient_step{step_idx}_existing_xi_d.npy")
+        if os.path.exists(legacy):
+            xi_path = legacy
+    existing_xi_d = np.load(xi_path)
     xi_rot = np.load(os.path.join(output_dir, "xi_rot.npy"))
 
     data_keys = ["dq", "dp", "taust", "pmax", "pmin", "hmax", "hmin"]
@@ -169,16 +174,16 @@ def main():
 
     print("Assembling training and evaluation matrices")
     X = metamodel.get_training_matrix()
-    rot_indices = [0, 1, 2, 3, 5, 6, 8, 9]
+    rot_indices = [0, 1, 5, 6]
     if transient:
         rot_indices.extend([11, 12])
     X_rot = np.vstack([xi_rot[i] for i in rot_indices]).T
     print(f'Size of training data: {X.shape}')
 
-    feature_names = ["H", "P", "U", "V", "dPdx", "dPdy", "dHdx", "dHdy"]
-    dQx_feature_names = ["H", "P", "U", "dPdx", "dHdx"]
-    dQy_feature_names = ["H", "P", "V", "dPdy", "dHdy"]
-    dP_feature_names = ["H", "P", "dPdx", "dPdy", "dHdx", "dHdy"]
+    feature_names = ["H", "P", "dPdx", "dPdy"]
+    dQx_feature_names = ["H", "P", "dPdx"]
+    dQy_feature_names = ["H", "P", "dPdy"]
+    dP_feature_names = ["H", "P", "dPdx", "dPdy"]
     if transient:
         feature_names.extend(["Hdot", "Pdot"])
         dQx_feature_names.extend(["Hdot", "Pdot"])
