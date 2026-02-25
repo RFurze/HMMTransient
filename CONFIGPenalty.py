@@ -24,7 +24,7 @@ from config.dataclasses import (
 # Runtime configuration
 # ------------------------------------------------------------------
 runtime = RuntimeSettings(
-    OUTPUT_DIR="TestNewCode",
+    OUTPUT_DIR="TransientBaseCase",
     MAX_LB_ITERS=20,
     MAX_COUPLING_ITERS=20,
     TEND=4.00,
@@ -47,7 +47,7 @@ material = MaterialParams(
     eccentricity0=[0.0, 0.0, 0.9950523437], #0.9541235992
     E=105e9,
     nu=0.3,
-    k_spring=5e14,
+    k_spring=1e15,
 )
 
 ideal_film_thickness = FilmThicknessParams(
@@ -133,7 +133,7 @@ micro_physical = MicroPhysicalParams(
     beta_fraction=0.05,
     xmax=7.5e-5,
     ymax=7.5e-5,
-    k_spring=5e14,
+    k_spring=1e15,
 )
 
 micro_solver = MicroSolverSettings(
@@ -168,5 +168,5 @@ MLS_DEGREE = np.array([2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
 
 
 # Coupling defaults
-ND_FACTOR = 0.6
+ND_FACTOR = 0.4
 RO_THETA = 20

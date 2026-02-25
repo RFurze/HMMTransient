@@ -406,10 +406,10 @@ def _infer_num_procs(args) -> int:
             except Exception:
                 pass
     try:
-        v = int(os.environ.get("MICRO_NPROCS", "12"))
-        return v if v > 0 else 12
+        v = int(os.environ.get("MICRO_NPROCS", "24"))
+        return v if v > 0 else 24
     except Exception:
-        return 12
+        return 24
 
 
 def main():

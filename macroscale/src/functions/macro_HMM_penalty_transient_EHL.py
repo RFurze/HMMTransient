@@ -2837,7 +2837,24 @@ class RotationMatrix(UserExpression):
         np.save(outpath, self.R_function.vector().get_local())
 
     def load(self, filename):
-        inpath = os.path.join(os.environ.get("HMM_RESULTS_DIR", os.path.join("data", "output")), filename)
+        candidate_paths = []
+        if os.path.isabs(filename):
+            candidate_paths.append(filename)
+        else:
+            candidate_paths.append(filename)
+            candidate_paths.append(
+                os.path.join(
+                    os.environ.get("HMM_RESULTS_DIR", os.path.join("data", "output")),
+                    filename,
+                )
+            )
+
+        inpath = next((path for path in candidate_paths if os.path.exists(path)), None)
+        if inpath is None:
+            raise FileNotFoundError(
+                f"Unable to find rotation matrix file '{filename}'. Tried: {candidate_paths}"
+            )
+
         data = np.load(inpath)
         self.R_function.vector()[:] = data
 
@@ -2873,7 +2890,24 @@ class RotationMatrixInverse(UserExpression):
         np.save(output_dir, self.R_inv_function.vector().get_local())
 
     def load(self, filename):
-        input_dir = os.path.join(os.environ.get("HMM_RESULTS_DIR", os.path.join("data", "output")), filename)
+        candidate_paths = []
+        if os.path.isabs(filename):
+            candidate_paths.append(filename)
+        else:
+            candidate_paths.append(filename)
+            candidate_paths.append(
+                os.path.join(
+                    os.environ.get("HMM_RESULTS_DIR", os.path.join("data", "output")),
+                    filename,
+                )
+            )
+
+        input_dir = next((path for path in candidate_paths if os.path.exists(path)), None)
+        if input_dir is None:
+            raise FileNotFoundError(
+                f"Unable to find inverse rotation matrix file '{filename}'. Tried: {candidate_paths}"
+            )
+
         data = np.load(input_dir)
         self.R_inv_function.vector()[:] = data
 
