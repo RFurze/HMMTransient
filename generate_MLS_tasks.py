@@ -90,8 +90,7 @@ def main():
             MetaModel3 as MetaModel,
         )
 
-        step_idx = int(round(T / DT)) if DT != 0 else int(T)
-        prefix = f"transient_step{step_idx}_"
+        prefix = "transient_"
         print(
             f"Starting build_task_list.py for T={T}, lb_iter={lb_iter}, c_iter={c_iter}"
         )
@@ -124,23 +123,18 @@ def main():
     data_keys = ["dq", "dp", "taust", "pmax", "pmin", "hmax", "hmin"]
     existing = {}
     if transient:
-        if lb_iter == 0 and c_iter == 1:
+        first_file = os.path.join(output_dir, f"{prefix}existing_{data_keys[0]}.npy")
+        if not os.path.exists(first_file):
+            print("No existing results to concatenate, creating new files.")
+            sys.stdout.flush()
             existing = {k: results[k].copy() for k in data_keys}
         else:
-            first_file = os.path.join(
-                output_dir, f"{prefix}existing_{data_keys[0]}.npy"
-            )
-            if not os.path.exists(first_file):
-                print("No existing results to concatenate, creating new files.")
-                sys.stdout.flush()
-                existing = {k: results[k].copy() for k in data_keys}
-            else:
-                existing = {
-                    k: np.load(os.path.join(output_dir, f"{prefix}existing_{k}.npy"))
-                    for k in data_keys
-                }
-                for k in data_keys:
-                    existing[k] = np.concatenate((existing[k], results[k]), axis=0)
+            existing = {
+                k: np.load(os.path.join(output_dir, f"{prefix}existing_{k}.npy"))
+                for k in data_keys
+            }
+            for k in data_keys:
+                existing[k] = np.concatenate((existing[k], results[k]), axis=0)
     else:
         if c_iter == 1 and lb_iter == 1:
             existing = {k: results[k].copy() for k in data_keys}
@@ -169,13 +163,13 @@ def main():
 
     print("Assembling training and evaluation matrices")
     X = metamodel.get_training_matrix()
-    rot_indices = [0, 1, 2, 3, 5, 6]
+    rot_indices = [0, 1, 5, 6]
     if transient:
-        rot_indices.extend([8, 9])
+        rot_indices.extend([11, 12])
     X_rot = np.vstack([xi_rot[i] for i in rot_indices]).T
     print(f'Size of training data: {X.shape}')
 
-    feature_names = ["H", "P", "U", "V", "dPdx", "dPdy"]
+    feature_names = ["H", "P", "dPdx", "dPdy"]
     dQx_feature_names = ["H", "P", "dPdx"]
     dQy_feature_names = ["H", "P", "dPdy"]
     dP_feature_names = ["H", "P", "dPdx", "dPdy"]

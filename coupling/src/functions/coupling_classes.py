@@ -85,15 +85,15 @@ class MetaModel3:
            1) self.existing_xi_d with shape (9, n_points).
            2) a new xi_d also with shape (9, n_new_points).
         """
-        # # 1) Reorder each array in xi
-        # # xi = [comp[order] for comp in xi]
-        # #   xi now = [h[order], p[order],
-        # #             lmbx[order], lmby[order], lmbz[order],
-        # #             gradpx[order], gradpy[order], gradpz[order],
-        # #             f[order]]
+        # 1) Reorder each array in xi
+        # xi = [comp[order] for comp in xi]
+        #   xi now = [h[order], p[order],
+        #             lmbx[order], lmby[order], lmbz[order],
+        #             gradpx[order], gradpy[order], gradpz[order],
+        #             f[order]]
 
-        # # 2) Unpack them. We'll call lmbx => U in coverage, ignoring lmby,lmbz,gradpz for coverage
-        # H, P, U, V, lmbZ, dPdx, dPdy, gradPz, dFdx, dFdy, dFdz, F = xi
+        # 2) Unpack them. We'll call lmbx => U in coverage, ignoring lmby,lmbz,gradpz for coverage
+        H, P, U, V, lmbZ, dPdx, dPdy, gradPz, dHdx, dHdy, dHdz = xi
 
         # # 3) Scale the 6 coverage variables
         # Hn, H_min, H_max = self._min_max_scale(H)
@@ -102,13 +102,12 @@ class MetaModel3:
         # Vn, V_min, V_max = self._min_max_scale(V)
         # dPdxn, dPdx_min, dPdx_max = self._min_max_scale(dPdx)
         # dPdyn, dPdy_min, dPdy_max = self._min_max_scale(dPdy)
-        # Fn, F_min, F_max = self._min_max_scale(F)
-        # dFdxn, dFdx_min, dFdx_max = self._min_max_scale(dFdx)
-        # dFdyn, dFdy_min, dFdy_max = self._min_max_scale(dFdy)
+        # dHdxn, dHdx_min, dHdx_max = self._min_max_scale(dHdx)
+        # dHdyn, dHdy_min, dHdy_max = self._min_max_scale(dHdy)
 
-        # # 4) Combine into a matrix for coverage checking: shape (#points, 6)
+        # # 4) Combine into a matrix for coverage checking: shape (#points, 8)
         # new_data_norm = np.column_stack(
-        #     [Hn, Pn, Un, Vn, dPdxn, dPdyn, dFdxn, dFdyn, Fn]
+        #     [Hn, Pn, Un, Vn, dPdxn, dPdyn, dHdxn, dHdyn]
         # )
         # # 5) Define coverage radius r0
         # ro_theta = RO_THETA
@@ -137,7 +136,7 @@ class MetaModel3:
         # )
 
         # # We'll keep track of newly accepted points in "new_unscaled" with shape (#,6).
-        # new_unscaled = np.zeros((0, 6))
+        # new_unscaled = np.zeros((0, 8))
 
         # if init:
         #     # ==============================================================
@@ -179,39 +178,40 @@ class MetaModel3:
         #     chosen_unscaled[:, 3] = unscale(chosen_centers[:, 3], V_min, V_max)
         #     chosen_unscaled[:, 4] = unscale(chosen_centers[:, 4], dPdx_min, dPdx_max)
         #     chosen_unscaled[:, 5] = unscale(chosen_centers[:, 5], dPdy_min, dPdy_max)
-        #     chosen_unscaled[:, 6] = unscale(chosen_centers[:, 6], dFdx_min, dFdx_max)
-        #     chosen_unscaled[:, 7] = unscale(chosen_centers[:, 7], dFdy_min, dFdy_max)
-        #     chosen_unscaled[:, 8] = unscale(chosen_centers[:, 8], F_min, F_max)
+        #     chosen_unscaled[:, 6] = unscale(chosen_centers[:, 6], dHdx_min, dHdx_max)
+        #     chosen_unscaled[:, 7] = unscale(chosen_centers[:, 7], dHdy_min, dHdy_max)
 
         #     # Build self.existing_xi_d as shape (9, M)
         #     # We'll store:
         #     #   row 0 => H
         #     #   row 1 => P
         #     #   row 2 => lmbx
-        #     #   row 3 => lmby  ( = 0 if you're ignoring it)
-        #     #   row 4 => lmbz  ( = 0 if you're ignoring it)
+        #     #   row 3 => lmby  ( = 0 if ignoring)
+        #     #   row 4 => lmbz  ( = 0 if ignoring)
         #     #   row 5 => dPdx
         #     #   row 6 => dPdy
-        #     #   row 7 => gradPz ( = 0 if ignoring)
-        #     #   row 8 => f
+        #     #   row 7 => dPdz ( = 0 if ignoring)
+        #     #   row 8 => dHdx
+        #     #   row 9 => dHdy
+        #     #   row 10 => dHdz ( = 0 if ignoring)
         #     existing_array = np.zeros((12, M))
         #     existing_array[0, :] = chosen_unscaled[:, 0]  # H
         #     existing_array[1, :] = chosen_unscaled[:, 1]  # P
         #     existing_array[2, :] = chosen_unscaled[:, 2]  # lmbx
-        #     # ignoring lmby,lmbz => store 0
         #     existing_array[3, :] = chosen_unscaled[:, 3]  # lmby
+        #     # ignoring lmby,lmbz => store 0
         #     existing_array[4, :] = 0.0  # lmbz
         #     existing_array[5, :] = chosen_unscaled[:, 4]  # dPdx
         #     existing_array[6, :] = chosen_unscaled[:, 5]  # dPdy
         #     # ignoring gradPz => store 0
         #     existing_array[7, :] = 0.0  # gradPz
-        #     existing_array[8, :] = chosen_unscaled[:, 6]  # dFdx
-        #     existing_array[9, :] = chosen_unscaled[:, 7]  # dFdy
-        #     existing_array[10, :] = 0.0  # dFdz
-        #     existing_array[11, :] = chosen_unscaled[:, 8]  # f
+        #     existing_array[8, :] = chosen_unscaled[:, 6]  # dHdx
+        #     existing_array[9, :] = chosen_unscaled[:, 7]  # dHdy
+        #     # ignoring dHdz => store 0
+        #     existing_array[10, :] = 0.0  # dHdz
 
         #     self.existing_xi_d = existing_array
-        #     new_unscaled = chosen_unscaled  # shape (M,6)
+        #     new_unscaled = chosen_unscaled  # shape (M,8)
 
         # else:
         #     # ==============================================================
@@ -227,9 +227,9 @@ class MetaModel3:
         #     #   ex[0,:] = H   => scale w.r.t. (H_min,H_max)
         #     #   ex[1,:] = P   => scale w.r.t. (P_min,P_max)
         #     #   ex[2,:] = lmbx => scale w.r.t. (U_min,U_max)
-        #     #   ex[5,:] = dPdx => scale
-        #     #   ex[6,:] = dPdy => scale
-        #     #   ex[8,:] = f    => scale
+        #     #   ex[3,:] = lmby => scale w.r.t. (V_min,V_max)
+        #     #   ex[5,:] = dHdx => scale
+        #     #   ex[6,:] = dHdy => scale
         #     # everything else is 0 or ignored.
 
         #     def scale_column(col, cmin, cmax):
@@ -245,10 +245,9 @@ class MetaModel3:
         #     Vx = scale_column(ex[3, :], V_min, V_max)
         #     dx = scale_column(ex[5, :], dPdx_min, dPdx_max)
         #     dy = scale_column(ex[6, :], dPdy_min, dPdy_max)
-        #     dFdx = scale_column(ex[8, :], dFdx_min, dFdx_max)
-        #     dFdy = scale_column(ex[9, :], dFdy_min, dFdy_max)
-        #     Fx = scale_column(ex[11, :], F_min, F_max)
-        #     existing_norm = np.column_stack([Hx, Px, Ux, Vx, dx, dy, dFdx, dFdy, Fx])
+        #     dHdx = scale_column(ex[8, :], dHdx_min, dHdx_max)
+        #     dHdy = scale_column(ex[9, :], dHdy_min, dHdy_max)
+        #     existing_norm = np.column_stack([Hx, Px, Ux, Vx, dx, dy, dHdx, dHdy])
 
         #     frac_before = self._coverage_fraction(new_data_norm, existing_norm, r0)
         #     logging.info(f"[UPDATE] Coverage fraction BEFORE = {frac_before:.3f}")
@@ -278,17 +277,16 @@ class MetaModel3:
         #             accepted_norm[:, 5] * (dPdy_max - dPdy_min) + dPdy_min
         #         )
         #         new_unscaled[:, 6] = (
-        #             accepted_norm[:, 6] * (dFdx_max - dFdx_min) + dFdx_min
+        #             accepted_norm[:, 6] * (dHdx_max - dHdx_min) + dHdx_min
         #         )
         #         new_unscaled[:, 7] = (
-        #             accepted_norm[:, 7] * (dFdy_max - dFdy_min) + dFdy_min
+        #             accepted_norm[:, 7] * (dHdy_max - dHdy_min) + dHdy_min
         #         )
-        #         new_unscaled[:, 8] = accepted_norm[:, 8] * (F_max - F_min) + F_min
 
         #         # Build new_points => shape (9, #acc)
         #         # fill the same rows
         #         n_acc = new_unscaled.shape[0]
-        #         new_points = np.zeros((12, n_acc))
+        #         new_points = np.zeros((11, n_acc))
         #         new_points[0, :] = new_unscaled[:, 0]
         #         new_points[1, :] = new_unscaled[:, 1]
         #         new_points[2, :] = new_unscaled[:, 2]
@@ -299,8 +297,6 @@ class MetaModel3:
         #         # row 7 => 0 dpdz
         #         new_points[8, :] = new_unscaled[:, 6]
         #         new_points[9, :] = new_unscaled[:, 7]
-        #         # row 10 => 0 dFdz
-        #         new_points[11, :] = new_unscaled[:, 8]
 
         #         # concat
         #         self.existing_xi_d = np.concatenate((ex, new_points), axis=1)
@@ -317,11 +313,10 @@ class MetaModel3:
         #     Vx = scale_column(ex_updated[3, :], V_min, V_max)
         #     dx = scale_column(ex_updated[5, :], dPdx_min, dPdx_max)
         #     dy = scale_column(ex_updated[6, :], dPdy_min, dPdy_max)
-        #     dFdx = scale_column(ex_updated[8, :], dFdx_min, dFdx_max)
-        #     dFdy = scale_column(ex_updated[9, :], dFdy_min, dFdy_max)
-        #     Fx = scale_column(ex_updated[11, :], F_min, F_max)
+        #     dFdx = scale_column(ex_updated[8, :], dHdx_min, dHdx_max)
+        #     dFdy = scale_column(ex_updated[9, :], dHdy_min, dHdy_max)
         #     existing_norm_updated = np.column_stack(
-        #         [Hx, Px, Ux, Vx, dx, dy, dFdx, dFdy, Fx]
+        #         [Hx, Px, Ux, Vx, dx, dy, dFdx, dFdy]
         #     )
         #     frac_after = self._coverage_fraction(
         #         new_data_norm, existing_norm_updated, r0
@@ -342,9 +337,8 @@ class MetaModel3:
         #     Vd = new_unscaled[:, 3]
         #     dxd = new_unscaled[:, 4]
         #     dyd = new_unscaled[:, 5]
-        #     dFdxd = new_unscaled[:, 6]
-        #     dFdyd = new_unscaled[:, 7]
-        #     Fd = new_unscaled[:, 8]
+        #     dHdxd = new_unscaled[:, 6]
+        #     dHdyd = new_unscaled[:, 7]
 
         #     Z = np.zeros_like(Hd)
         #     # Build a 9-list
@@ -357,10 +351,9 @@ class MetaModel3:
         #         dxd,  # row 5 => dPdx
         #         dyd,  # row 6 => dPdy
         #         Z,  # row 7 => ignoring gradPz
-        #         dFdxd,  # row 8 => dfdx
-        #         dFdyd,  # row 9 => dFdy
-        #         Z,  # row 10 => ignoring dFdz
-        #         Fd,  # row 8 => cavitation fraction
+        #         dHdxd,  # row 8 => dHdx
+        #         dHdyd,  # row 9 => dHdy
+        #         Z,  # row 10 => ignoring dHdz
         #     ]
 
         # # 6) Build tasks from all newly accepted points
@@ -422,7 +415,9 @@ class MetaModel3:
         Vvals = ex[3, :]
         dPdxv = ex[5, :]
         dPdyv = ex[6, :]
-        return np.column_stack([Hvals, Pvals, Uvals, Vvals, dPdxv, dPdyv])
+        dHdxv = ex[7, :]
+        dHdyv = ex[8, :]
+        return np.column_stack([Hvals, Pvals, Uvals, Vvals, dPdxv, dPdyv, dHdxv, dHdyv])
 
 
 def weighted_distance(a, b, weight_f=2.0):

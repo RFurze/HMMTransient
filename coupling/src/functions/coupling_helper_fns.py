@@ -16,6 +16,9 @@ def build_task_list(xi):
       xi[5] = gradPx
       xi[6] = gradPy
       xi[7] = gradPz
+      xi[8] = gradHx
+      xi[9] = gradHy
+      xi[10] = gradHz
     We want each micro task to include this new "f" as well.
     """
     logging.info("Building task list from xi...")
@@ -28,6 +31,9 @@ def build_task_list(xi):
     gradPx_rotated = xi[5]
     gradPy_rotated = xi[6]
     gradPz_rotated = xi[7]
+    gradHx_rotated = xi[8]
+    gradHy_rotated = xi[9]
+    gradHz_rotated = xi[10]
 
     N = len(h_base)  # same as len(p_base), etc.
 
@@ -47,6 +53,9 @@ def build_task_list(xi):
             gradPx_rotated[task_id],
             gradPy_rotated[task_id],
             gradPz_rotated[task_id],
+            gradHx_rotated[task_id],
+            gradHy_rotated[task_id],
+            gradHz_rotated[task_id],
         )
         tasks.append(task)
 
@@ -56,7 +65,7 @@ def build_task_list(xi):
 
 def build_task_list_transient(xi):
     """
-    xi is a 9-element list:
+    xi is a 10-element list:
       xi[0] = h
       xi[1] = p
       xi[2] = lmbx
@@ -65,8 +74,11 @@ def build_task_list_transient(xi):
       xi[5] = gradPx
       xi[6] = gradPy
       xi[7] = gradPz
-      xi[8] = f  (cavitation fraction)
-    We want each micro task to include this new "f" as well.
+      xi[8] = gradHx
+      xi[9] = gradHy
+      xi[10] = gradHz
+      xi[11] = hdot
+      xi[12] = pdot
     """
     logging.info("Building task list from xi...")
 
@@ -78,8 +90,11 @@ def build_task_list_transient(xi):
     gradPx_rotated = xi[5]
     gradPy_rotated = xi[6]
     gradPz_rotated = xi[7]
-    h_dot = xi[8]  # This is the time derivative of h
-    p_dot = xi[9]  # This is the time derivative of p
+    gradHx_rotated = xi[8]
+    gradHy_rotated = xi[9]
+    gradHz_rotated = xi[10]
+    h_dot = xi[11]  # This is the time derivative of h
+    p_dot = xi[12]  # This is the time derivative of p
 
     N = len(h_base)  # same as len(p_base), etc.
 
@@ -99,6 +114,9 @@ def build_task_list_transient(xi):
             gradPx_rotated[task_id],
             gradPy_rotated[task_id],
             gradPz_rotated[task_id],
+            gradHx_rotated[task_id],
+            gradHy_rotated[task_id],
+            gradHz_rotated[task_id],
             h_dot[task_id],  # Time derivative of h
             p_dot[task_id],  # Time derivative of p
         )

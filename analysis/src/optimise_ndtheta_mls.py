@@ -14,8 +14,8 @@ python3 -m analysis.src.optimise_ndtheta_mls \
   --nd_factors "0.2, 0.5, 0.6" \
   --theta_values "1000, 5000, 10000" \
   --k_neighbors 500 \
-  --w_thresh 1e-3 \
-  --match_tol 1e-5
+  --w_thresh 1e-16 \
+  --match_tol 1e-12
 """
 
 from __future__ import annotations

@@ -1542,7 +1542,7 @@ class EHLSolver:
 
             # ONLY-P RELAX: remove δ ramp & caps entirely
 
-            max_relaxation_iterations = 100
+            max_relaxation_iterations = 200
             relaxation_iteration = 0
             pressure_residual = 1.0
             deformation_residual = 1.0

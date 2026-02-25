@@ -24,10 +24,10 @@ from config.dataclasses import (
 # Runtime configuration
 # ------------------------------------------------------------------
 runtime = RuntimeSettings(
-    OUTPUT_DIR="SmoothTransient3",
+    OUTPUT_DIR="BaseCase250226",
     MAX_LB_ITERS=20,
     MAX_COUPLING_ITERS=20,
-    TEND=7.00,
+    TEND=4.00,
     DT=0.05,
     T0=0.0,
 )
@@ -47,11 +47,11 @@ material = MaterialParams(
     eccentricity0=[0.0, 0.0, 0.9950523437], #0.9541235992
     E=105e9,
     nu=0.3,
-    k_spring=5e13,
+    k_spring=1e16,
 )
 
 ideal_film_thickness = FilmThicknessParams(
-    Ah=0.0,  # 1.25e-7,
+    Ah=2.75e-7,  # 1.25e-7,
     kx=1,
     ky=1,
 )
@@ -109,7 +109,7 @@ solver = SolverParams(
     xi=1e6,
     bc_tol=1e-4,
     Id=1,
-    Tend=7.0,
+    Tend=3.0,
     dt=0.05,
     t_export_interval=0.1,
     angular_velocity_fn=angular_velocity,
@@ -133,7 +133,7 @@ micro_physical = MicroPhysicalParams(
     beta_fraction=0.05,
     xmax=7.5e-5,
     ymax=7.5e-5,
-    k_spring=5e13,
+    k_spring=1e16,
 )
 
 micro_solver = MicroSolverSettings(
@@ -168,5 +168,5 @@ MLS_DEGREE = np.array([2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
 
 
 # Coupling defaults
-ND_FACTOR = 0.6
+ND_FACTOR = 0.4
 RO_THETA = 20

@@ -14,6 +14,7 @@ Key command line options from :func:`parse_common_args` (``with_time=True``):
 
 from __future__ import annotations
 from utils.cli import parse_common_args
+from utils.output_layout import infer_case_id
 from pathlib import Path
 from typing import Any
 import os
@@ -104,7 +105,6 @@ def main(argv: list[str] | None = None) -> None:
     p_last_T = np.load(os.path.join(output_dir, f"{prefix_last}p.npy"))
     deform_last_T = np.load(os.path.join(output_dir, f"{prefix_last}def.npy"))
     h_last_T = np.load(os.path.join(output_dir, f"{prefix_last}h.npy"))
-    h_last_T = np.load(os.path.join(output_dir, f"{prefix_last}h.npy"))
     xi_prev = np.load(output_dir / "xi_rot_prev.npy")
     xi_last_T = np.load(os.path.join(output_dir, f"{prefix_last}xi.npy"))
 
@@ -139,8 +139,9 @@ def main(argv: list[str] | None = None) -> None:
         meshfn(mesh_parameters(**asdict(mesh))),
         material_parameters(**asdict(material)),
         solver_parameters(**asdict(solver_params)),
-        output_dir.name,
+        infer_case_id(args.output_dir),
     )
+
     solver.reinitialise_solver(eccentricity=last_ecc)
 
     # Always load the last converged time-step fields for transient terms.
@@ -157,12 +158,9 @@ def main(argv: list[str] | None = None) -> None:
     #     deform_guess = np.load(output_dir / "def_init.npy")
     #     h_guess = np.load(output_dir / "h_init.npy")
     #     print("Initial guess source: previous coupling iteration in current load-balance")
-
     p_guess = p_last_T
     deform_guess = deform_last_T
     h_guess = h_last_T
-    print("Initial guess source: last converged transient step")
-
     solver.p.vector()[:] = p_guess
     solver.delta.vector()[:] = deform_guess
     solver.h.vector()[:] = h_guess
@@ -210,23 +208,29 @@ def main(argv: list[str] | None = None) -> None:
             tausty = np.zeros(n)
         else:
             print(f"Loading correction terms...")
-            dQ = np.load(os.path.join(args.output_dir, "dq_results.npy"))
-            dQx = dQ[:, 0]
-            dQy = dQ[:, 1]
-            dP = np.load(os.path.join(args.output_dir, "dp_results.npy"))
-            # dQx = np.load(output_dir / "dQx.npy")
-            # dQy = np.load(output_dir / "dQy.npy")
-            # dP = np.load(output_dir / "dP.npy")
-            taustall = np.load(os.path.join(args.output_dir, "tau_results.npy"))
-            taustx = taustall[:, 0]
-            tausty = taustall[:, 1]
-            # taustx = np.load(output_dir / "taustx.npy")
-            # tausty = np.load(output_dir / "tausty.npy")
+            # dQ = np.load(os.path.join(args.output_dir, "dq_results.npy"))
+            # dQx = dQ[:, 0]
+            # dQy = dQ[:, 1]
+            # dP = np.load(os.path.join(args.output_dir, "dp_results.npy"))
+            dQx = np.load(output_dir / "dQx.npy")
+            dQy = np.load(output_dir / "dQy.npy")
+            dP = np.load(output_dir / "dP.npy")
+            # taustall = np.load(os.path.join(args.output_dir, "tau_results.npy"))
+            # taustx = taustall[:, 0]
+            # tausty = taustall[:, 1]
+            taustx = np.load(output_dir / "taustx.npy")
+            tausty = np.load(output_dir / "tausty.npy")
+            pmax = np.load(os.path.join(args.output_dir, "pmax.npy"))
+            pmin = np.load(os.path.join(args.output_dir, "pmin.npy"))
+            hmax = np.load(os.path.join(args.output_dir, "hmax.npy"))
+            hmin = np.load(os.path.join(args.output_dir, "hmin.npy"))
 
         solver.apply_corrections(
             (dQx, dQy, np.zeros_like(dQx)),
             (taustx, tausty, np.zeros_like(taustx)),
             dP,
+            p_bounds=(pmax, pmin),
+            h_bounds=(hmax, hmin),
         )
         solver.export("dQ", tag="COUPLING0", iter=lb_iter)
         solver.export("dP", tag="COUPLING0", iter=lb_iter)
@@ -288,6 +292,7 @@ def main(argv: list[str] | None = None) -> None:
     np.save(output_dir / "p_init.npy", solver.p.vector()[:])
     np.save(output_dir / "def_init.npy", solver.delta.vector()[:])
     np.save(output_dir / "h_init.npy", solver.h.vector()[:])
+
     np.save(output_dir / "xi_rot.npy", xi_out)  # Saving the xi for the next micro run
 
     # ------------------------------------------------------------------
@@ -299,21 +304,21 @@ def main(argv: list[str] | None = None) -> None:
             p0 = np.load(p0_path)
         else:
             print("p0.npy not found; reconstructing from xi_rot_prev.npy")
-            p0 = xi_prev[1, :] + DT * xi_prev[9, :]
-        p1 = xi_out[1, :] + DT * xi_out[9, :]
+            p0 = xi_prev[1, :] + DT * xi_prev[12, :]
+        p1 = xi_out[1, :] + DT * xi_out[12, :]
         d_coupling_err = np.linalg.norm(p1 - p0) / np.linalg.norm(p0)
         print(
-            f"DT*xi_out[9, :] norm = {np.linalg.norm(DT * xi_out[9, :]):.12e}, p norm = {np.linalg.norm(xi_out[1, :]):.12e}"
+            f"DT*xi_out[12, :] norm = {np.linalg.norm(DT * xi_out[12, :]):.12e}, p norm = {np.linalg.norm(xi_out[1, :]):.12e}"
         )
         print(
             f"p0 norm = {np.linalg.norm(p0):.12e}, p1 norm = {np.linalg.norm(p1):.12e}, p1-p0 norm = {np.linalg.norm(p1 - p0):.12e}"
         )
         np.save(p0_path, p1)
     else:
-        p1 = xi_out[1, :] + DT * xi_out[9, :]
+        p1 = xi_out[1, :] + DT * xi_out[12, :]
         d_coupling_err = 1
         print(
-            f"coupling iter 1 DT*xi_out[9, :] norm = {np.linalg.norm(DT * xi_out[9, :]):.12e}, p norm = {np.linalg.norm(xi_out[1, :]):.12e}, p1 norm = {np.linalg.norm(p1):.12e}"
+            f"coupling iter 1 DT*xi_out[12, :] norm = {np.linalg.norm(DT * xi_out[12, :]):.12e}, p norm = {np.linalg.norm(xi_out[1, :]):.12e}, p1 norm = {np.linalg.norm(p1):.12e}"
         )
         np.save(output_dir / "p0.npy", p1)
 
@@ -343,7 +348,7 @@ def main(argv: list[str] | None = None) -> None:
 
         # -- load‑balance convergence ----------------------------------
         if abs(load_balance_err) < transient.load_balance_tol:
-            for func in ("p", "Q", "h", "dQ", "dP"):
+            for func in ("p", "Q", "h", "dQ", "dP", "pmax", "pmin", "hmax","hmin"):
                 solver.export_series(func, T)
                 print(f"Exporting {func} for T={T}, lb_iter={lb_iter}, c_iter={c_iter}")
                 # solver.export(func, tag="Transient", iter=c_iter, lbiter=lb_iter, T=T)
