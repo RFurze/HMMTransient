@@ -169,16 +169,16 @@ def main():
 
     print("Assembling training and evaluation matrices")
     X = metamodel.get_training_matrix()
-    rot_indices = [0, 1, 2, 3, 5, 6, 8, 9]
+    rot_indices = [0, 1, 2, 3, 5, 6]
     if transient:
-        rot_indices.extend([11, 12])
+        rot_indices.extend([8, 9])
     X_rot = np.vstack([xi_rot[i] for i in rot_indices]).T
     print(f'Size of training data: {X.shape}')
 
-    feature_names = ["H", "P", "U", "V", "dPdx", "dPdy", "dHdx", "dHdy"]
-    dQx_feature_names = ["H", "P", "U", "dPdx", "dHdx"]
-    dQy_feature_names = ["H", "P", "V", "dPdy", "dHdy"]
-    dP_feature_names = ["H", "P", "dPdx", "dPdy", "dHdx", "dHdy"]
+    feature_names = ["H", "P", "U", "V", "dPdx", "dPdy"]
+    dQx_feature_names = ["H", "P", "dPdx"]
+    dQy_feature_names = ["H", "P", "dPdy"]
+    dP_feature_names = ["H", "P", "dPdx", "dPdy"]
     if transient:
         feature_names.extend(["Hdot", "Pdot"])
         dQx_feature_names.extend(["Hdot", "Pdot"])
