@@ -202,35 +202,21 @@ class MetaModel3:
         self.hmind = hmin_results.copy()
 
     def get_training_matrix(self):
-        """
-        Return the entire cumulative set of chosen points as shape (#points, 6).
-        For example, columns: [H, P, U, dPdx, dPdy, f].
+        """Return cumulative training predictors used by transient MLS.
+
+        Columns: [H, P, dPdx, dPdy, Hdot, Pdot]
         """
         if self.existing_xi_d is None:
             return np.zeros((0, 6))
 
-        ex = self.existing_xi_d  # shape (9, n_points)
-        # Extract the 6 coverage variables
+        ex = self.existing_xi_d  # shape (13, n_points)
         Hvals = ex[0, :]
         Pvals = ex[1, :]
-        Uvals = ex[2, :]
-        Vvals = ex[3, :]
         dPdxv = ex[5, :]
         dPdyv = ex[6, :]
-        Hdotvals = ex[8, :]
-        Pdotvals = ex[9, :]
-        return np.column_stack(
-            [
-                Hvals,
-                Pvals,
-                Uvals,
-                Vvals,
-                dPdxv,
-                dPdyv,
-                Hdotvals,
-                Pdotvals,
-            ]
-        )
+        Hdotvals = ex[11, :]
+        Pdotvals = ex[12, :]
+        return np.column_stack([Hvals, Pvals, dPdxv, dPdyv, Hdotvals, Pdotvals])
 
 
 def weighted_distance(a, b, weight_f=1.0):
