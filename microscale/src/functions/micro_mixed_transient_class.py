@@ -804,7 +804,6 @@ class MicroMixedSolver:
         self.bdf_a0.assign(1.0)
         self.bdf_a1.assign(-1.0)
         self.bdf_a2.assign(0.0)
-
         for step in range(1, n_steps):
             t_dim = step * dt_dim
             t_nd = t_dim / self.t0
@@ -1154,12 +1153,15 @@ def main() -> None:
     mesh_m = UnitSquareMesh(n_m, n_m)
     mesh_h = UnitSquareMesh(n_h, n_h)
 
-    inputtask = 9665
-    tasks = np.load("data/input/MLSCheck/tasks.npy", allow_pickle=True)
+    inputtask = 8665
+    tasks = np.load("data/input/OneToOne/tasks.npy", allow_pickle=True)
     print(f'Shape tasks: {np.shape(tasks)}')
-    (task_id, row_idx, H, P, Ux, Uy, _, gradp1, gradp2, _, Hdot, Pdot) = tasks[inputtask,:]
+    (task_id, row_idx, H, P, Ux, Uy, _, gradp1, gradp2, _, _,_,_, Hdot, Pdot) = tasks[inputtask,:]
+    # (task_id, row_idx, H0, P0, Ux, Uy, _, gradp1, gradp2, _, _,_,_, Hdot, Pdot) = tasks[inputtask,:]
     print(f'Task {inputtask}: {tasks[inputtask,:]}')
-
+    # H = H0 + Hdot * 0.05
+    # P = P0 + Pdot * 0.05
+    print(f'H end = {H}, Pend = {P}')
     def ht(x, y, xmax, ymax, H0, HT, T, Ux, Uy):
         Ah = ideal_film_thickness.Ah
         kx = ideal_film_thickness.kx
@@ -1181,6 +1183,7 @@ def main() -> None:
 
         # return UFL expression (this is what the solver needs)
         return H0 + HT * T + 0.5 * Ah * (cos(kx * 2 * pi * (x_d + T * Ux) / xmax) + cos(ky * 2 * pi * (y_d + Uy*T) / ymax))
+        # return H0 + HT * T + 0.5 * Ah * (cos(kx * 2 * pi * (x_d) / xmax) + cos(ky * 2 * pi * (y_d) / ymax))
     
     # params = MicroPhysicalParameters(
     #     Ux=0.02,
@@ -1217,7 +1220,7 @@ def main() -> None:
         h_min=0.0,  # Mixed masking disabled
         HT=Hdot,
         PT=Pdot,
-        Tend=1.0,
+        Tend=0.05,
         k_spring=getattr(micro_physical, "k_spring", 0.0),
     )
     settings = MicroSolverSettings(
@@ -1234,10 +1237,10 @@ def main() -> None:
 
     import time
     start = time.time()
-    out_dir = "./data/output/mixed_micro6/"
+    out_dir = "./data/output/MovingMicro/"
     solver = MicroMixedSolver(mesh_m, mesh_h, params, settings, 1, ht, export_vtk=True, output_dir=out_dir, auto_solve=False)
     # solver.solve()
-    solver.run(Tf=params.Tend, n_steps = 300)
+    solver.run(Tf=params.Tend, n_steps = 500)
     # solver.post_process()
     print(f'Compute time = {time.time() - start}')
 

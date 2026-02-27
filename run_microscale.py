@@ -300,8 +300,12 @@ def run_micro_task(task, transient: bool = False, macro_dt: float | None = None,
 
 
     if transient:
+        # try:
+        #     print(f"Running transient: {tend}, {_get_env_int('MICRO_NSTEPS', 10)}")
+        # except:
+        #     None
         # Not enabled yet (BDF stepping will be added next in the solver).
-        solver.run(Tf=tend, n_steps=_get_env_int('MICRO_NSTEPS', 8))
+        solver.run(Tf=tend, n_steps=_get_env_int('MICRO_NSTEPS', 10))
         # solver.post_process()
     else:
         solver.run_steady()
@@ -532,6 +536,39 @@ def main():
             next_progress_t = (int(elapsed // progress_every) + 1) * progress_every
             last_completed = completed
             last_elapsed = elapsed
+
+
+    # -------------------------------------------------------------------------
+    # Diagnostics (min/max) BEFORE saving results
+    # -------------------------------------------------------------------------
+    def _nan_counts(arr: np.ndarray) -> int:
+        try:
+            return int(np.isnan(arr).sum())
+        except Exception:
+            return 0
+
+    def _print_minmax(name: str, arr: np.ndarray) -> None:
+        arr = np.asarray(arr)
+        n_nan = _nan_counts(arr)
+        # If everything is NaN, nanmin/nanmax will raise; handle gracefully.
+        try:
+            vmin = float(np.nanmin(arr))
+            vmax = float(np.nanmax(arr))
+            print(f"[DIAG] {name:10s}  min={vmin:.6e}  max={vmax:.6e}  nan={n_nan}")
+        except Exception:
+            print(f"[DIAG] {name:10s}  min=NaN  max=NaN  nan={n_nan}  (all-NaN or empty)")
+
+    print("\n[DIAG] Summary of microscale outputs (min/max across all tasks):")
+    # dQ components
+    _print_minmax("dQx", dq_results[:, 0] if dq_results.ndim == 2 and dq_results.shape[1] >= 1 else dq_results)
+    _print_minmax("dQy", dq_results[:, 1] if dq_results.ndim == 2 and dq_results.shape[1] >= 2 else dq_results)
+    # scalar outputs
+    _print_minmax("dP", dp_results)
+    _print_minmax("pmax", pmax_results)
+    _print_minmax("pmin", pmin_results)
+    _print_minmax("max_h", max_h_results)
+    _print_minmax("min_h", min_h_results)
+    sys.stdout.flush()
 
     # Save (matching legacy filenames)
     np.save(os.path.join(output_dir, "dq_results.npy"), dq_results)

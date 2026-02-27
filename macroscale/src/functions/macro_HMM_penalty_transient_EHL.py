@@ -1534,15 +1534,15 @@ class EHLSolver:
             # --- Symmetric ramp-up controls (pressure mixing) ---
             # If the pressure residual keeps decreasing for a few consecutive steps,
             # gently increase theta_p up to a safe cap to shorten the "long tail".
-            theta_p_min = 0.05
-            theta_p_cap = 0.5
+            theta_p_min = 0.02
+            theta_p_cap = 0.6
             theta_p_growth = 1.25  # multiplicative step when ramping up
             dec_needed = 3  # consecutive decreases required
             dec_count = 0  # counter of consecutive decreases
 
             # ONLY-P RELAX: remove δ ramp & caps entirely
 
-            max_relaxation_iterations = 200
+            max_relaxation_iterations = 400
             relaxation_iteration = 0
             pressure_residual = 1.0
             deformation_residual = 1.0
@@ -1584,7 +1584,6 @@ class EHLSolver:
             with self._suspend_balance_cache():
                 while (
                     (pressure_residual > pressure_relaxation_tol)
-                    or (deformation_residual > deformation_relaxation_tol)
                     or (relaxation_iteration < self.inner_min_iters)
                     or _regularisation_active()  # <-- do not exit while any regularisation remains
                     or _need_to_continue()  # <-- require a couple of clean iterations after S→0
@@ -1675,7 +1674,21 @@ class EHLSolver:
                         stagnation_hits += 1
                     else:
                         stagnation_hits = 0
-
+                    # If we're stalling, first try making the pressure fixed-point map more contractive
+                    # by reducing the pressure mixing factor. This is generally safer than triggering
+                    # other mechanisms (e.g. smoothing decay) while far from converged.
+                    if stagnation_detected and not self._eta_relax_active:
+                        stall_patience = int(getattr(self, "theta_p_stall_patience", 1))
+                        if stagnation_hits >= stall_patience:
+                            theta_before = float(theta_p)
+                            stall_shrink = float(getattr(self, "theta_p_stall_shrink", 0.7))
+                            theta_p = max(theta_p * stall_shrink, theta_p_min)
+                            if theta_p < theta_before:
+                                # Reset ramp-up counter when we back off
+                                dec_count = 0
+                                print(f"[P-MIX] Stagnation → theta_p back-off: {theta_before:.3f} → {theta_p:.3f}")
+                            # Reset the stagnation counter so we don't shrink every single iteration
+                            stagnation_hits = 0
                     if (
                         stagnation_detected
                         and not self._eta_relax_active
@@ -2121,7 +2134,11 @@ class EHLSolver:
             try:
                 e_seed = self._as_scalar(getattr(result, "x", initial_guess))
             except Exception:
-                e_seed = last_good["e"] if last_good["e"] is not None else self._as_scalar(initial_guess)
+                e_seed = (
+                    last_good_e["e"]
+                    if last_good_e["e"] is not None
+                    else self._as_scalar(initial_guess)
+                )
             self.material_properties.eccentricity0 = np.array([0.0, 0.0, e_seed], dtype=float)
             self._balance_cache.clear()
             return self.solve_loadbalance_secant(HMMState=HMMState, transientState=transientState)
@@ -2698,13 +2715,15 @@ class EHLSolver:
 
         # Create a combined iteration string if both iter and lbiter are provided.
         combined = None
-        if T is not None:
+
+        if iter is not None and lbiter is not None and T is not None:
             T = T * 10000
-            combined = f"{T}"
+            combined = f"{T}-{lbiter}-{iter}"
         elif iter is not None and lbiter is not None and T is None:
             combined = f"{lbiter}-{iter}"
-        elif iter is not None and lbiter is not None and T is not None:
-            combined = f"{T}-{lbiter}-{iter}"
+        elif iter is None and lbiter is None and T is not None:    
+            T = T * 10000
+            combined = f"{T}"
 
         if tag is None:
             file_path = os.path.join(self.results_root, self.output_folder, f"{class_name}_{f}.pvd")

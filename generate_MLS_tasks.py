@@ -170,8 +170,8 @@ def main():
     print(f'Size of training data: {X.shape}')
 
     feature_names = ["H", "P", "dPdx", "dPdy"]
-    dQx_feature_names = ["H", "P", "dPdx"]
-    dQy_feature_names = ["H", "P", "dPdy"]
+    dQx_feature_names = ["H", "P", "dPdx", "dPdy"]
+    dQy_feature_names = ["H", "P", "dPdx", "dPdy"]
     dP_feature_names = ["H", "P", "dPdx", "dPdy"]
     if transient:
         feature_names.extend(["Hdot", "Pdot"])

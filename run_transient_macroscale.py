@@ -21,7 +21,6 @@ import os
 import sys
 import numpy as np
 from fenics import *
-
 from dataclasses import asdict
 from CONFIGPenalty import (
     material,
@@ -68,6 +67,57 @@ def read_last_force(path: Path) -> np.ndarray:
     last = path.read_text().strip().splitlines()[-1]
     return np.fromstring(last.replace("[", "").replace("]", ""), sep=" ").reshape(1, 3)
 
+
+
+def _load_if_exists(path: Path) -> np.ndarray | None:
+    try:
+        return np.load(path)
+    except OSError:
+        return None
+
+def _load_scalar_if_exists(path: Path) -> float | None:
+    try:
+        arr = np.load(path)
+        return float(arr)
+    except OSError:
+        return None
+
+def _save_scalar(path: Path, value: float) -> None:
+    np.save(path, np.array(value, dtype=float))
+
+def _mix(prev_used: np.ndarray | None, new: np.ndarray, omega: float) -> np.ndarray:
+    """Under-relax: used = prev_used + omega*(new - prev_used). If no prev_used, use new."""
+    if prev_used is None or prev_used.shape != new.shape:
+        return new
+    return prev_used + omega * (new - prev_used)
+
+def _aitken_update_omega(
+    omega_k: float,
+    delta_k: np.ndarray,
+    delta_km1: np.ndarray | None,
+    omega_min: float,
+    omega_max: float,
+    eps: float = 1e-30,
+) -> float:
+    """
+    Aitken Δ² for vector fixed-point iterations.
+    Using formula:
+      omega_{k+1} = - omega_k * <delta_k, delta_k - delta_{k-1}> / ||delta_k - delta_{k-1}||^2
+    where delta_k = (new - used_prev) at iteration k.
+    """
+    if delta_km1 is None:
+        return float(np.clip(omega_k, omega_min, omega_max))
+
+    d = (delta_k - delta_km1).ravel()
+    num = float(np.dot(delta_k.ravel(), d))
+    den = float(np.dot(d, d))
+
+    if den < eps:
+        # No meaningful change -> keep omega
+        return float(np.clip(omega_k, omega_min, omega_max))
+
+    omega_kp1 = -omega_k * (num / den)
+    return float(np.clip(omega_kp1, omega_min, omega_max))
 
 # -----------------------------------------------------------------------------
 # Main workflow
@@ -148,19 +198,19 @@ def main(argv: list[str] | None = None) -> None:
     solver.load_state(p_last_T, deform_last_T, h=h_last_T, time=T, dt=DT)
 
     # Choose initial guesses for the nonlinear solve.
-    # if c_iter == 1:
-    #     p_guess = p_last_T
-    #     deform_guess = deform_last_T
-    #     h_guess = h_last_T
-    #     print("Initial guess source: last converged transient step")
-    # else:
-    #     p_guess = np.load(output_dir / "p_init.npy")
-    #     deform_guess = np.load(output_dir / "def_init.npy")
-    #     h_guess = np.load(output_dir / "h_init.npy")
-    #     print("Initial guess source: previous coupling iteration in current load-balance")
-    p_guess = p_last_T
-    deform_guess = deform_last_T
-    h_guess = h_last_T
+    if c_iter == 1:
+        p_guess = p_last_T
+        deform_guess = deform_last_T
+        h_guess = h_last_T
+        print("Initial guess source: last converged transient step")
+    else:
+        p_guess = np.load(output_dir / "p_init.npy")
+        deform_guess = np.load(output_dir / "def_init.npy")
+        h_guess = np.load(output_dir / "h_init.npy")
+        print("Initial guess source: previous coupling iteration in current load-balance")
+    # p_guess = p_last_T
+    # deform_guess = deform_last_T
+    # h_guess = h_last_T
     solver.p.vector()[:] = p_guess
     solver.delta.vector()[:] = deform_guess
     solver.h.vector()[:] = h_guess
@@ -207,23 +257,120 @@ def main(argv: list[str] | None = None) -> None:
             taustx = np.zeros(n)
             tausty = np.zeros(n)
         else:
-            print(f"Loading correction terms...")
-            # dQ = np.load(os.path.join(args.output_dir, "dq_results.npy"))
-            # dQx = dQ[:, 0]
-            # dQy = dQ[:, 1]
-            # dP = np.load(os.path.join(args.output_dir, "dp_results.npy"))
-            dQx = np.load(output_dir / "dQx.npy")
-            dQy = np.load(output_dir / "dQy.npy")
-            dP = np.load(output_dir / "dP.npy")
-            # taustall = np.load(os.path.join(args.output_dir, "tau_results.npy"))
-            # taustx = taustall[:, 0]
-            # tausty = taustall[:, 1]
-            taustx = np.load(output_dir / "taustx.npy")
-            tausty = np.load(output_dir / "tausty.npy")
-            pmax = np.load(os.path.join(args.output_dir, "pmax.npy"))
-            pmin = np.load(os.path.join(args.output_dir, "pmin.npy"))
-            hmax = np.load(os.path.join(args.output_dir, "hmax.npy"))
-            hmin = np.load(os.path.join(args.output_dir, "hmin.npy"))
+            print("Loading correction terms...")
+
+            # --- new micro corrections from this coupling iteration ---
+            dQx_new = np.load(output_dir / "dQx.npy")
+            dQy_new = np.load(output_dir / "dQy.npy")
+            dP_new  = np.load(output_dir / "dP.npy")
+
+            taustx_new = np.load(output_dir / "taustx.npy")
+            tausty_new = np.load(output_dir / "tausty.npy")
+
+            pmax_new = np.load(output_dir / "pmax.npy")
+            pmin_new = np.load(output_dir / "pmin.npy")
+            hmax_new = np.load(output_dir / "hmax.npy")
+            hmin_new = np.load(output_dir / "hmin.npy")
+
+            # --- load previous "used" corrections (what we actually applied last time) ---
+            dQx_used_prev = _load_if_exists(output_dir / "dQx_used.npy")
+            dQy_used_prev = _load_if_exists(output_dir / "dQy_used.npy")
+            dP_used_prev  = _load_if_exists(output_dir / "dP_used.npy")
+
+            taustx_used_prev = _load_if_exists(output_dir / "taustx_used.npy")
+            tausty_used_prev = _load_if_exists(output_dir / "tausty_used.npy")
+
+            pmax_used_prev = _load_if_exists(output_dir / "pmax_used.npy")
+            pmin_used_prev = _load_if_exists(output_dir / "pmin_used.npy")
+            hmax_used_prev = _load_if_exists(output_dir / "hmax_used.npy")
+            hmin_used_prev = _load_if_exists(output_dir / "hmin_used.npy")
+
+            # --- Aitken state from disk (scalar omega and previous delta) ---
+            # We compute omega using dP only, and apply that omega to everything.
+            omega_path = output_dir / "coupling_omega.npy"
+            delta_path = output_dir / "coupling_delta_dP.npy"
+
+            # defaults / bounds (tune via env vars)
+            omega_init = float(os.getenv("COUPLING_OMEGA_INIT", "0.3"))
+            omega_min  = float(os.getenv("COUPLING_OMEGA_MIN",  "0.05"))
+            omega_max  = float(os.getenv("COUPLING_OMEGA_MAX",  "0.8"))
+
+            omega_k = _load_scalar_if_exists(omega_path)
+            if omega_k is None:
+                omega_k = omega_init
+
+            delta_km1 = _load_if_exists(delta_path)
+
+            # Optional hard reset (e.g. at start of LB iteration)
+            if os.getenv("COUPLING_AITKEN_RESET", "0") == "1":
+                delta_km1 = None
+                omega_k = omega_init
+
+            # --- form delta_k using dP (delta_k = new - used_prev) ---
+            if dP_used_prev is None or dP_used_prev.shape != dP_new.shape:
+                # no previous "used" state -> cannot Aitken update; just accept new and persist
+                omega_used = float(np.clip(omega_k, omega_min, omega_max))
+                dQx = dQx_new
+                dQy = dQy_new
+                dP  = dP_new
+                taustx = taustx_new
+                tausty = tausty_new
+                pmax = pmax_new
+                pmin = pmin_new
+                hmax = hmax_new
+                hmin = hmin_new
+
+                # delta_k for next time (still store something sensible)
+                delta_k = (dP_new - dP_new)  # zeros
+            else:
+                delta_k = (dP_new - dP_used_prev)
+
+                # Aitken update omega_{k+1} based on delta_k and delta_{k-1}
+                omega_next = _aitken_update_omega(
+                    omega_k=omega_k,
+                    delta_k=delta_k,
+                    delta_km1=delta_km1,
+                    omega_min=omega_min,
+                    omega_max=omega_max,
+                )
+
+                # Use the UPDATED omega (common practice: compute omega_{k+1}, apply it immediately)
+                omega_used = omega_next
+
+                # --- apply the same omega to all correction arrays ---
+                dQx = _mix(dQx_used_prev, dQx_new, omega_used)
+                dQy = _mix(dQy_used_prev, dQy_new, omega_used)
+                dP  = _mix(dP_used_prev,  dP_new,  omega_used)
+
+                taustx = _mix(taustx_used_prev, taustx_new, omega_used)
+                tausty = _mix(tausty_used_prev, tausty_new, omega_used)
+
+                pmax = _mix(pmax_used_prev, pmax_new, omega_used)
+                pmin = _mix(pmin_used_prev, pmin_new, omega_used)
+                hmax = _mix(hmax_used_prev, hmax_new, omega_used)
+                hmin = _mix(hmin_used_prev, hmin_new, omega_used)
+
+            # --- persist "used" corrections for next coupling iteration ---
+            np.save(output_dir / "dQx_used.npy", dQx)
+            np.save(output_dir / "dQy_used.npy", dQy)
+            np.save(output_dir / "dP_used.npy",  dP)
+
+            np.save(output_dir / "taustx_used.npy", taustx)
+            np.save(output_dir / "tausty_used.npy", tausty)
+
+            np.save(output_dir / "pmax_used.npy", pmax)
+            np.save(output_dir / "pmin_used.npy", pmin)
+            np.save(output_dir / "hmax_used.npy", hmax)
+            np.save(output_dir / "hmin_used.npy", hmin)
+
+            # --- persist Aitken state for next time ---
+            # store omega used and the current delta_k for dP
+            _save_scalar(omega_path, omega_used)
+            np.save(delta_path, delta_k)
+
+            if os.getenv("COUPLING_AITKEN_DIAG", "0") == "1":
+                n_delta = float(np.linalg.norm(delta_k.ravel()))
+                print(f"[AITKEN] omega_used={omega_used:.4f} (min={omega_min:.3f}, max={omega_max:.3f}) ||delta_dP||={n_delta:.3e}")
 
         solver.apply_corrections(
             (dQx, dQy, np.zeros_like(dQx)),
@@ -232,9 +379,13 @@ def main(argv: list[str] | None = None) -> None:
             p_bounds=(pmax, pmin),
             h_bounds=(hmax, hmin),
         )
-        solver.export("dQ", tag="COUPLING0", iter=lb_iter)
-        solver.export("dP", tag="COUPLING0", iter=lb_iter)
-        solver.export("taust_rot", tag="mid", iter=lb_iter)
+        solver.export("dQ", tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
+        solver.export("dP", tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
+        solver.export("taust_rot", tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
+        solver.export('hmin', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
+        solver.export('hmax', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
+        solver.export('pmax', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
+        solver.export('pmin', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
 
         # solver.solver_params.Rnewton_relaxation_parameter = 0.2
         solver.initialise_velocity()
@@ -242,7 +393,7 @@ def main(argv: list[str] | None = None) -> None:
             solver.material_properties.eccentricity0,
             HMMState=True,
             transientState=True,
-            EHLState=True,  # ADDED 29/01/26
+            EHLState=True,
         )
         print(
             f"Solving HMM with eccentricity: {solver.material_properties.eccentricity0[2]:.12f}"
