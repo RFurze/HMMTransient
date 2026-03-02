@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from turtle import width
 from fenics import *
 from fenics import parameters
+import time
 
 parameters["form_compiler"]["quadrature_degree"] = 4 #8 #4 seems to be reasonable?
 import numpy as np
@@ -362,12 +363,12 @@ class EHLSolver:
         )
         self.main_residuals = []
         self.calc_current_load(self.t)
-        if np.isfinite(self.material_properties.hertz_pmax):
-            print(
-                "Hertz reference: a = "
-                f"{self.material_properties.hertz_contact_radius:.6e} m, p_max = "
-                f"{self.material_properties.hertz_pmax/1e6:.3f} MPa"
-            )
+        # if np.isfinite(self.material_properties.hertz_pmax):
+        #     print(
+        #         "Hertz reference: a = "
+        #         f"{self.material_properties.hertz_contact_radius:.6e} m, p_max = "
+        #         f"{self.material_properties.hertz_pmax/1e6:.3f} MPa"
+        #     )
         os.makedirs(self.results_root, exist_ok=True)
         self.h_file = File(os.path.join(self.results_root, "h_series.pvd"))
         self.p_file = File(os.path.join(self.results_root, "p_series.pvd"))
@@ -534,7 +535,7 @@ class EHLSolver:
         self.K = load_npz(self.solver_params.K_matrix_dir)
         # Convert K to a CSR matrix
         self.K = self.K.tocsr()
-        print("Loaded influence matrix")
+        # print("Loaded influence matrix")
 
     def calculate_deformation(self, p, K, dP=None):
         """Calculate the elastic deformation from the pressure field using the influence matrix."""
@@ -636,7 +637,6 @@ class EHLSolver:
             return
 
         if not hasattr(self, "hprev"):
-            print(f"Initialising hprev")
             self.init_hprev()
         if not hasattr(self, "rhoprev"):
             self.init_rhoprev()
@@ -1338,7 +1338,6 @@ class EHLSolver:
                 delta += self.calculate_deformation(self.dP, self.K)
             self.delta.vector()[:] = delta
 
-        print("Starting EHL deformation loop (no dP/dQ relaxation; α,β fixed).")
         with self._suspend_balance_cache():
             while ((pressure_residual > pressure_relaxation_tol)) and (
                 relaxation_iteration < max_relaxation_iterations
@@ -1486,12 +1485,12 @@ class EHLSolver:
             # Basic state setup
             self.material_properties.eccentricity0 = np.array([0.0, 0.0, ecc], dtype=float)
 
-            print(
-                f"Max initial pressure: {self.p.vector().max()*self.material_properties.p0/1e6} MPa"
-            )
-            print(
-                f"Max initial deformation: {self.delta.vector().max()*self.material_properties.c} mm"
-            )
+            # print(
+            #     f"Max initial pressure: {self.p.vector().max()*self.material_properties.p0/1e6} MPa"
+            # )
+            # print(
+            #     f"Max initial deformation: {self.delta.vector().max()*self.material_properties.c} mm"
+            # )
             # print(f"Current regularisation parameter {self.h_regularisation_param}")
 
             # First uncavitated-magnitude estimate + one Newton to seed p
@@ -1523,10 +1522,10 @@ class EHLSolver:
                 eta_relax_trigger = pressure_relaxation_tol
             deformation_relaxation_tol = float(self.inner_tol_d)
 
-            print(
-                f"Using inner tols: p={pressure_relaxation_tol:.2e}, δ={deformation_relaxation_tol:.2e} "
-                f"(min iters={self.inner_min_iters})"
-            )
+            # print(
+            #     f"Using inner tols: p={pressure_relaxation_tol:.2e}, δ={deformation_relaxation_tol:.2e} "
+            #     f"(min iters={self.inner_min_iters})"
+            # )
 
             # Pressure under-relaxation (fixed)
             theta_p = 0.2  # conservative pressure under-relaxation
@@ -1553,7 +1552,6 @@ class EHLSolver:
             reg_stagnation_hits = 0
             reg_secondary_hits = 0
 
-            print("Starting EHL deformation loop (pressure relaxation)...")
             # print(
             #     f"Initial residuals: p={pressure_residual:.2e}, δ={deformation_residual:.2e}"
             # )
@@ -1567,6 +1565,68 @@ class EHLSolver:
                 getattr(self.solver_params, "reg_clear_fraction_tol", 1e-6)
             )
             reg_clear_streak = 0
+
+            # ---------------------------
+            # PROGRESS / DEBUG PRINTING
+            # ---------------------------
+            # Controls (env vars so you can turn on/off without code changes)
+            #   EHL_PROGRESS=0/1         : master on/off (default 1)
+            #   EHL_PROGRESS_EVERY=N     : print every N iterations (default 10)
+            #   EHL_PROGRESS_FIRST=N     : always print first N iterations (default 8)
+            #   EHL_PROGRESS_VERBOSE=0/1 : include extra state scalars (default 1)
+            _progress_on = int(os.environ.get("EHL_PROGRESS", "0")) != 0
+            _progress_every = max(1, int(os.environ.get("EHL_PROGRESS_EVERY", "50")))
+            _progress_first = max(0, int(os.environ.get("EHL_PROGRESS_FIRST", "2")))
+            _progress_verbose = int(os.environ.get("EHL_PROGRESS_VERBOSE", "0")) != 0
+            _t0_inner = time.time()
+
+            _theta_last = float(theta_p)
+            _last_print_iter = -10**9
+
+            def _get_reg_fracs():
+                stats = getattr(self, "_regularisation_stats", {}) or {}
+                frac_pre = float(stats.get("last_fraction", 0.0) or 0.0)
+                frac_sat = float(stats.get("last_saturated_fraction", 0.0) or 0.0)
+                return frac_pre, frac_sat
+
+            def _state_scalars():
+                # Best-effort: never crash logging
+                pmax_mpa = float("nan")
+                hmin_um = float("nan")
+                try:
+                    pmax_mpa = float(self.p.vector().max()) * float(self.material_properties.p0) / 1e6
+                except Exception:
+                    pass
+                try:
+                    hmin_um = float(self.h.vector().min()) * float(self.material_properties.c) / 1e-6
+                except Exception:
+                    pass
+                return pmax_mpa, hmin_um
+
+            def _progress_line(tag=""):
+                if not _progress_on:
+                    return
+                frac_pre, frac_sat = _get_reg_fracs()
+                Scur = float(getattr(self, "_reg_decay_S_current", 0.0) or 0.0)
+                eta_mix = float(getattr(self, "_eta_relax_mixing", 0.0) or 0.0)
+                eta_act = bool(getattr(self, "_eta_relax_active", False))
+
+                # always safe, terse core line
+                base = (
+                    f"[EHL-PROG]{tag} it={relaxation_iteration:4d} "
+                    f"pRes={pressure_residual:9.3e} dRes={deformation_residual:9.3e} "
+                    f"theta_p={theta_p:6.3f} "
+                    f"S={Scur:8.2e} "
+                    f"reg(pre/sat)={100*frac_pre:6.2f}%/{100*frac_sat:6.2f}% "
+                    f"regStreak={reg_clear_streak:2d}/{reg_clear_needed:2d} "
+                    f"etaMix={eta_mix:5.2f} etaOn={int(eta_act)} "
+                    f"stagHit={stagnation_hits:2d}"
+                )
+                if _progress_verbose:
+                    pmax_mpa, hmin_um = _state_scalars()
+                    dt_s = time.time() - _t0_inner
+                    base += f" pMax={pmax_mpa:7.2f}MPa hMin={hmin_um:7.3f}um t={dt_s:6.2f}s"
+                print(base)
 
             def _regularisation_active() -> bool:
                 stats = getattr(self, "_regularisation_stats", {}) or {}
@@ -1645,6 +1705,13 @@ class EHLSolver:
                     pressure_residual = self.relative_residual(p_new, p_old)
                     deformation_residual = self.relative_residual(delta_new, delta_old)
 
+                    # Print progress (rate-limited)
+                    if _progress_on:
+                        if (relaxation_iteration < _progress_first) or (
+                            (relaxation_iteration - _last_print_iter) >= _progress_every
+                        ):
+                            _progress_line()
+                            _last_print_iter = relaxation_iteration
 
                     # ---- stagnation guard (windowed min, robust to oscillations) ----
                     p_res_history.append(float(pressure_residual))
@@ -1674,10 +1741,17 @@ class EHLSolver:
                         stagnation_hits += 1
                     else:
                         stagnation_hits = 0
+
+                    # If stagnation just triggered, print a one-off diagnostics line immediately
+                    if _progress_on and stagnation_detected and (stagnation_hits == 1):
+                        _progress_line(tag=" [STAG]")
+
                     # If we're stalling, first try making the pressure fixed-point map more contractive
                     # by reducing the pressure mixing factor. This is generally safer than triggering
                     # other mechanisms (e.g. smoothing decay) while far from converged.
-                    if stagnation_detected and not self._eta_relax_active:
+                    if stagnation_detected and (
+                        not self._eta_relax_active or self._eta_relaxation_complete()
+                    ):
                         stall_patience = int(getattr(self, "theta_p_stall_patience", 1))
                         if stagnation_hits >= stall_patience:
                             theta_before = float(theta_p)
@@ -1687,11 +1761,14 @@ class EHLSolver:
                                 # Reset ramp-up counter when we back off
                                 dec_count = 0
                                 print(f"[P-MIX] Stagnation → theta_p back-off: {theta_before:.3f} → {theta_p:.3f}")
+                                if _progress_on:
+                                    _progress_line(tag=" [THETA↓]")
                             # Reset the stagnation counter so we don't shrink every single iteration
                             stagnation_hits = 0
                     if (
                         stagnation_detected
                         and not self._eta_relax_active
+                        and not self._eta_relaxation_complete()
                         and stagnation_hits
                         >= int(getattr(self, "stagnation_patience", 2))
                     ):
@@ -1776,10 +1853,13 @@ class EHLSolver:
                         # )
 
                     # Back-off or ramp-up for pressure (ONLY-P RELAX)
-                    if pressure_residual > 1.2 * prev_p_res:
+                    if pressure_residual > 1.1 * prev_p_res:
                         # residual worsened noticeably → back off and reset ramp counter
                         theta_p = max(0.5 * theta_p, theta_p_min)
                         dec_count = 0
+                        if _progress_on and abs(theta_p - _theta_last) > 1e-14:
+                            _theta_last = float(theta_p)
+                            _progress_line(tag=" [THETA↓]")
                     else:
                         # Track consecutive decreases; ignore tiny noise
                         # Treat as a "decrease" if down by at least ~1% (robust to jitter)
@@ -1790,12 +1870,26 @@ class EHLSolver:
 
                         # When things are smooth, gently increase theta_p (up to cap)
                         if dec_count >= dec_needed:
-                            new_theta = min(theta_p * theta_p_growth, theta_p_cap)
+                            # Default cap
+                            current_cap = theta_p_cap
+
+                            # Apply a stricter, dynamically scaled cap if operating at full Roelands viscosity
+                            if self._eta_relaxation_complete():
+                                # Scale the cap inversely with the current load to prevent aggressive steps at high loads.
+                                # Use a baseline numerator of 0.15 (can be tuned later) and prevent division by zero.
+                                load_factor = max(float(self.current_load), 0.1)
+                                dynamic_cap = 0.15 / load_factor
+                                current_cap = min(theta_p_cap, dynamic_cap)
+
+                            new_theta = min(theta_p * theta_p_growth, current_cap)
                             # Only log if we actually changed it
                             if new_theta > theta_p:
                                 # (optional) you can print a one-liner here if you want visibility
                                 # print(f"[P-MIX] Ramp-up: {theta_p:.3f} → {new_theta:.3f}")
                                 theta_p = new_theta
+                                if _progress_on and abs(theta_p - _theta_last) > 1e-14:
+                                    _theta_last = float(theta_p)
+                                    _progress_line(tag=" [THETA↑]")                                
                             dec_count = 0
 
                     prev_p_res = pressure_residual
@@ -2393,6 +2487,31 @@ class EHLSolver:
     def calc_temporal_gradient(self, new, old):
         # backward difference for calculating temporal gradient
         return (new - old) / self.dt
+
+    def geometric_min_film_thickness(self, eccentricity=None):
+        """Return minimum geometric film thickness (no elastic deformation) in metres.
+
+        This evaluates ``h = (1 - e*sqrt(1-x^2-y^2))*c`` on the current FE space so
+        it is directly comparable with ``self.h.vector().min()*c`` that includes
+        elastic deformation. It helps diagnose cases where reducing eccentricity
+        increases nominal gap while pressure/deformation still drives a lower total
+        minimum film.
+        """
+        if eccentricity is None:
+            ecc = float(self.material_properties.eccentricity0[2])
+        else:
+            ecc = float(self._as_scalar(eccentricity))
+
+        if not hasattr(self, "_sep_expr_geom_probe"):
+            self._sep_expr_geom_probe = Expression(
+                "(1 - (ecc)*sqrt(max(0.0, 1 - pow(x[0],2) - pow(x[1],2))))",
+                ecc=0.0,
+                element=self.V.ufl_element(),
+            )
+
+        self._sep_expr_geom_probe.ecc = ecc / self.material_properties.length_ratio
+        h_geom = interpolate(self._sep_expr_geom_probe, self.V)
+        return float(h_geom.vector().min() * self.material_properties.c)
 
     def dimensionalise_xi(self, xi):
         """
