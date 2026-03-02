@@ -63,7 +63,22 @@ def angular_velocity(t: float) -> float:
     Users may modify this function to prescribe a different time-dependent
     angular velocity profile.
 
-    The profile should be input with dimensions rad/s.
+    IMPORTANT — velocity convention
+    --------------------------------
+    This function must return the **mean** angular velocity of the contact,
+    i.e. half the surface angular velocity of the rotating body:
+
+        ω_mean = ω_surface / 2
+
+    For a ball-in-cup contact where only the ball rotates at ω_surface and
+    the cup is fixed, supply ω_surface / 2 here.  The macroscale Reynolds
+    equation uses this value directly as the Couette velocity (U_mean = Rc·ω),
+    and the microscale solver doubles the received linear velocity to recover
+    the true surface velocity (U_surface = 2·U_mean) for shear-stress
+    calculations.  Passing ω_surface instead of ω_mean would double both the
+    hydrodynamic pressure and the predicted friction force.
+
+    The profile should be input with dimensions rad/s (mean).
     """
     # return np.round(-5 * np.pi * np.pi * np.cos(t * 2 * np.pi) / 18, 2) # Friction test
     return 2  # round(5 * (0.4 * np.cos(t * 2 * np.pi) + 0.6), 4)

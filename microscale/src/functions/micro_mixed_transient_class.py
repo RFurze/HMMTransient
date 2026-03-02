@@ -86,7 +86,11 @@ class MicroPhysicalParameters:
 
     @property
     def U(self):
-        # Account for incoming velocity being 1/2 already (your original comment)
+        # Ux/Uy received from the macroscale are the **mean** contact velocities
+        # (U_mean = U_surface / 2, because the macroscale Reynolds equation uses
+        # mean velocity in its Couette flux term).  Double here to recover the
+        # true surface velocity (U_surface = 2·U_mean) used in the shear-stress
+        # calculation: τ = η·U_surface/h + h/2·dP/dx.
         return as_vector((Constant(2.0 * self.Ux), Constant(2.0 * self.Uy)))
 
     @property
@@ -401,8 +405,12 @@ class MicroMixedSolver:
             mask_fluid=Constant(1.0),
         )
 
-        # Nondimensional velocity vector (note: your p.U multiplies by 2; keep that convention if desired)
-        # If you want to preserve the "incoming is half already" logic, apply it BEFORE nondim:
+        # Nondimensional velocity vector.  The incoming Ux/Uy are mean velocities
+        # (U_mean); doubling gives U_surface = 2·U_mean for use in the advection
+        # (Couette) flux of the microscale Reynolds equation.  The factor of 2
+        # here and the factor of 1/2 in the flux conversion (q_dim = Uref·H0/2·q_nd)
+        # together ensure the effective dimensional Couette flux equals U_mean·H,
+        # consistent with the macroscale formulation.
         Ux_eff = 2.0 * self.Ux_nd
         Uy_eff = 2.0 * self.Uy_nd
         self.U_nd = as_vector((Constant(Ux_eff), Constant(Uy_eff)))
