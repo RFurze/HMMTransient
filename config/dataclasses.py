@@ -89,6 +89,21 @@ class TransientSettings:
 
 
 @dataclass
+class EDASSettings:
+    """Error-Driven Adaptive Sampling configuration for transient coupling."""
+    batch_size: int = 200
+    max_budget: int = 1000
+    max_refine_passes: int = 3
+    error_target: float = 0.05
+    alpha_blend: float = 0.5
+    delta_min_quantile: float = 0.1
+    lambda_decay: float = 2.0
+    sigma_spatial: float = 0.3
+    relevance_prune_threshold: float = 0.01
+    r0_quantile: float = 0.25
+
+
+@dataclass
 class RuntimeSettings:
     OUTPUT_DIR: str
     MAX_LB_ITERS: int

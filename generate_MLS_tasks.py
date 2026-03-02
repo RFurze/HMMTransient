@@ -5,6 +5,12 @@ them to existing training arrays and emits ``*_tasks.npz`` bundles.  Each
 bundle contains the task list and normalised matrices required by
 :mod:`4_run_MLS.py` to evaluate MLS predictions.
 
+**Transient path** — uses the EDAS shared normaliser for consistent
+feature scaling between the sampler and MLS.  Also saves relevance
+weights and normaliser state for the MLS error indicator computation.
+
+**Steady path** — unchanged from original behaviour.
+
 Inputs read from ``--output_dir``:
     ``dq_results.npy`` - flux increments ``dQ``.
     ``dp_results.npy`` - pressure corrections ``dP``.
@@ -16,6 +22,7 @@ Inputs read from ``--output_dir``:
 Outputs written back to ``--output_dir``:
     ``existing_*.npy`` - accumulated training data.
     ``*_tasks.npz`` - per-variable MLS query tasks.
+    (transient) ``edas_relevance_weights.npy`` - per-training-point weights.
 
 Command line options mirror those of :func:`utils.cli.parse_common_args`.
 """
@@ -28,8 +35,13 @@ from utils.cli import parse_common_args
 from CONFIGPenalty import MLS_THETA, MLS_DEGREE
 
 
-def create_multinom_tasks(X, Y, Xi, theta, n, verbose=False):
-    """Create tasks for parallel MLS solution."""
+def create_multinom_tasks(X, Y, Xi, theta, n, normaliser_state=None, verbose=False):
+    """Create tasks for parallel MLS solution.
+
+    If *normaliser_state* is provided (from EDAS), the feature normalisation
+    uses the shared bounds so it is consistent with the sampler.  Otherwise
+    the original per-column min/max normalisation is used.
+    """
     N, m = X.shape
     Ni = Xi.shape[0]
 
@@ -38,22 +50,32 @@ def create_multinom_tasks(X, Y, Xi, theta, n, verbose=False):
             f"Training inputs (X) have {N} samples but Y has {len(Y)} entries"
         )
 
-    # Normalise predictors ``X`` and query points ``Xi`` column-wise.
-    X_ = np.zeros_like(X, dtype=float)
-    Xi_ = np.zeros_like(Xi, dtype=float)
-    for j in range(m):
-        xcol = X[:, j]
-        xmin, xmax = xcol.min(), xcol.max()
-        rng = (xmax - xmin) if (xmax > xmin) else 1.0
-        X_[:, j] = (xcol - xmin) / rng
-        Xi_[:, j] = (Xi[:, j] - xmin) / rng
+    # --- Feature normalisation -------------------------------------------
+    if normaliser_state is not None:
+        # Use EDAS shared normaliser bounds
+        rmin = normaliser_state["running_min"]
+        rmax = normaliser_state["running_max"]
+        rng = rmax - rmin
+        rng[rng < 1e-15] = 1.0
+        X_ = (X - rmin) / rng
+        Xi_ = (Xi - rmin) / rng
+    else:
+        # Original per-column normalisation
+        X_ = np.zeros_like(X, dtype=float)
+        Xi_ = np.zeros_like(Xi, dtype=float)
+        for j in range(m):
+            xcol = X[:, j]
+            xmin, xmax = xcol.min(), xcol.max()
+            rng = (xmax - xmin) if (xmax > xmin) else 1.0
+            X_[:, j] = (xcol - xmin) / rng
+            Xi_[:, j] = (Xi[:, j] - xmin) / rng
 
-    # Normalise responses ``Y`` to [0, 1].
+    # --- Response normalisation ------------------------------------------
     Ymin, Ymax = Y.min(), Y.max()
     Yrng = (Ymax - Ymin) if (Ymax > Ymin) else 1.0
     Y_ = (Y - Ymin) / Yrng
 
-    # Build polynomial basis and design matrices.
+    # --- Polynomial basis ------------------------------------------------
     from coupling.src.functions.multinom_MLS_par import multinom_coeffs
 
     C, Nt = multinom_coeffs(n, m, verbose=verbose)
@@ -86,10 +108,6 @@ def main():
     transient = args.transient
 
     if transient:
-        from coupling.src.functions.transient_coupling_classes import (
-            MetaModel3 as MetaModel,
-        )
-
         prefix = "transient_"
         print(
             f"Starting build_task_list.py for T={T}, lb_iter={lb_iter}, c_iter={c_iter}"
@@ -149,20 +167,64 @@ def main():
     for k, arr in existing.items():
         np.save(os.path.join(output_dir, f"{prefix}existing_{k}.npy"), arr)
 
-    metamodel = MetaModel()
-    metamodel.existing_xi_d = existing_xi_d
-    metamodel.load_results(
-        existing["dq"],
-        existing["dp"],
-        existing["taust"],
-        existing["pmax"],
-        existing["pmin"],
-        existing["hmax"],
-        existing["hmin"],
-    )
+    # --- Build training matrix -------------------------------------------
+    if transient:
+        # Use EDAS training matrix: columns [H, P, dPdx, dPdy, Hdot, Pdot]
+        from coupling.src.functions.edas import ErrorDrivenSampler
+
+        edas_state_file = os.path.join(output_dir, "edas_state.npy")
+        edas_state = np.load(edas_state_file, allow_pickle=True).item()
+        sampler = ErrorDrivenSampler.from_state(edas_state)
+        X = sampler.get_training_matrix()
+
+        # Load shared normaliser state for consistent feature normalisation
+        norm_state_file = os.path.join(output_dir, "edas_normaliser_state.npy")
+        normaliser_state = np.load(norm_state_file, allow_pickle=True).item()
+
+        # Compute and save relevance weights for MLS weighting
+        timestamps_file = os.path.join(output_dir, "edas_timestamps.npy")
+        if os.path.exists(timestamps_file):
+            timestamps = np.load(timestamps_file)
+            from coupling.src.functions.edas import (
+                SharedNormaliser,
+                compute_relevance_weights,
+            )
+
+            norm = SharedNormaliser.from_state(normaliser_state)
+            rot_indices = [0, 1, 5, 6, 11, 12]
+            X_query_raw = np.vstack([xi_rot[i] for i in rot_indices]).T
+            norm.update(X_query_raw)
+            X_query_norm = norm.transform(X_query_raw)
+            X_train_norm = norm.transform(X)
+
+            rel_weights = compute_relevance_weights(
+                timestamps,
+                T,
+                X_train_norm,
+                X_query_norm,
+                lambda_decay=sampler.lambda_decay,
+                sigma_spatial=sampler.sigma_spatial,
+            )
+            np.save(os.path.join(output_dir, "edas_relevance_weights.npy"), rel_weights)
+        else:
+            rel_weights = np.ones(X.shape[0])
+            np.save(os.path.join(output_dir, "edas_relevance_weights.npy"), rel_weights)
+    else:
+        metamodel = MetaModel()
+        metamodel.existing_xi_d = existing_xi_d
+        metamodel.load_results(
+            existing["dq"],
+            existing["dp"],
+            existing["taust"],
+            existing["pmax"],
+            existing["pmin"],
+            existing["hmax"],
+            existing["hmin"],
+        )
+        X = metamodel.get_training_matrix()
+        normaliser_state = None
 
     print("Assembling training and evaluation matrices")
-    X = metamodel.get_training_matrix()
     rot_indices = [0, 1, 5, 6]
     if transient:
         rot_indices.extend([11, 12])
@@ -181,8 +243,6 @@ def main():
 
     default_features = list(range(len(feature_names)))
     feature_sets = {
-        # Customize the feature subsets below per output variable.
-        # Each list can include feature indices or names from `feature_names`.
         "dQx": dQx_feature_names,
         "dQy": dQy_feature_names,
         "dP": dP_feature_names,
@@ -229,20 +289,32 @@ def main():
         ("hmin", existing["hmin"], 8),
     ]
 
+    # For transient: prepare per-feature normaliser states
+    # The normaliser_state has all 6 features; we need sub-states for feature subsets
+    def get_subset_normaliser_state(feature_idx):
+        if normaliser_state is None:
+            return None
+        return {
+            "running_min": normaliser_state["running_min"][feature_idx],
+            "running_max": normaliser_state["running_max"][feature_idx],
+        }
+
     task_data = {}
     for name, y, idx in specs:
         feature_idx = resolve_feature_indices(name)
         X_sel = X[:, feature_idx]
         X_rot_sel = X_rot[:, feature_idx]
+        sub_norm = get_subset_normaliser_state(feature_idx) if transient else None
         task_data[name] = create_multinom_tasks(
-            X_sel, y, X_rot_sel, theta=theta[idx], n=degree[idx], verbose=verbose
+            X_sel, y, X_rot_sel, theta=theta[idx], n=degree[idx],
+            normaliser_state=sub_norm,
+            verbose=verbose,
         )
         task_data[name] += (feature_idx, )
 
     for name, (task_list, Mati, Ymin, Yrng, Xi, feature_idx) in task_data.items():
         file_path = os.path.join(output_dir, f"{name}_tasks.npz")
-        np.savez(
-            file_path,
+        save_dict = dict(
             tasks=np.array(task_list, dtype=object),
             Mati=Mati,
             Xi=Xi,
@@ -251,6 +323,7 @@ def main():
             feature_idx=np.array(feature_idx, dtype=int),
             feature_names=np.array(feature_names),
         )
+        np.savez(file_path, **save_dict)
 
     print("update_metamodel.py completed successfully.")
 

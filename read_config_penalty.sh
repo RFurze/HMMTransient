@@ -62,4 +62,23 @@ import CONFIGPenalty as CONFIG
 print(CONFIG.runtime.T0)
 PY
     )
+
+    # EDAS parameters for the transient refinement loop
+    EDAS_MAX_REFINE=$(python3 - <<'PY'
+import CONFIGPenalty as CONFIG
+print(CONFIG.edas.max_refine_passes)
+PY
+    )
+
+    EDAS_ERROR_TARGET=$(python3 - <<'PY'
+import CONFIGPenalty as CONFIG
+print(CONFIG.edas.error_target)
+PY
+    )
+
+    EDAS_MAX_BUDGET=$(python3 - <<'PY'
+import CONFIGPenalty as CONFIG
+print(CONFIG.edas.max_budget)
+PY
+    )
 }
