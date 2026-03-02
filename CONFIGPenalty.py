@@ -24,7 +24,7 @@ from config.dataclasses import (
 # Runtime configuration
 # ------------------------------------------------------------------
 runtime = RuntimeSettings(
-    OUTPUT_DIR="Parallel020326",
+    OUTPUT_DIR="BaseCase280226",
     MAX_LB_ITERS=20,
     MAX_COUPLING_ITERS=20,
     TEND=4.00,
@@ -51,7 +51,7 @@ material = MaterialParams(
 )
 
 ideal_film_thickness = FilmThicknessParams(
-    Ah=0.0,  # 1.25e-7,
+    Ah=2.25e-7,  # 1.25e-7,
     kx=1,
     ky=1,
 )

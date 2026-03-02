@@ -1,275 +1,376 @@
 """Evaluate MLS to obtain macroscale corrections.
 
 This step reads the ``*_tasks.npz`` bundles prepared by
-``3_update_metamodel`` and solves them in parallel using MPI. The predicted
-corrections ``dQx.npy``, ``dQy.npy``, ``dP.npy`` and ``Fst.npy`` are written
-to ``--output_dir`` for the subsequent macroscale solve.
+``3_update_metamodel`` and solves them in parallel using MPI.  The predicted
+corrections ``dQx.npy``, ``dQy.npy``, ``dP.npy`` and the remaining six
+correction variables are written to ``--output_dir`` for the subsequent
+macroscale solve.
 
-Key command line options:
-    ``--k_neighbors`` and ``--chunk_size`` control MLS workload.
-    ``--output_dir`` points to input bundles and is where outputs are saved.
+For the three primary correction fields (dQx, dQy, dP) a companion binary
+flag array ``<name>_mls_flag.npy`` is also written:
+
+    0 → full MLS solve succeeded (n_eff ≥ Nt polynomial terms)
+    1 → any fallback was used (k-NN, Tikhonov regularisation, or
+        nearest-neighbour constant)
+
+When ``np.linalg.lstsq`` raises ``LinAlgError`` (the SVD did not converge),
+the solve is retried with Tikhonov regularisation.  If that also fails the
+nearest-neighbour training value is substituted.  In all non-standard cases
+the flag is set to 1.  Diagnostic output is printed to stdout so the exact
+failing query points and their local geometry can be inspected.
+
+Key command line options
+------------------------
+``--k_neighbors`` and ``--chunk_size`` control MLS workload.
+``--w_thresh``    weight-fraction threshold (default 1e-3); a neighbour is
+                  considered effective if its Gaussian weight ≥ w_thresh × w_max.
+``--output_dir``  points to input bundles and is where outputs are saved.
 """
 
 import os
-from utils.cli import parse_common_args
 import time
 from concurrent.futures import as_completed
-from CONFIGPenalty import MLS_THETA, MLS_DEGREE
 
 import numpy as np
 from mpi4py import MPI
 from mpi4py.futures import MPIPoolExecutor
 from scipy.spatial import cKDTree
 
+from CONFIGPenalty import MLS_THETA, MLS_DEGREE
+from utils.cli import parse_common_args
+
 rank = MPI.COMM_WORLD.Get_rank()
 size = MPI.COMM_WORLD.Get_size()
 root = rank == 0
-# if root:
-#     print(
-#         f"[root] Master rank {rank} initialised with {size - 1} worker(s).", flush=True
-#     )
 
+# Variables for which a binary fallback-flag array is saved alongside the
+# prediction.  Extend this set if you need flags for other outputs.
+TRACK_FLAG = {"dQx", "dQy", "dP"}
 
-# Global training data cached on each worker
-G_MAT: np.ndarray | None = None  # (Ntrain, Npoly)
-G_Y: np.ndarray | None = None  # (Ntrain,)
-G_THETA: float | None = None
-TRANSIENT_MODE = False
+# ---------------------------------------------------------------------------
+# Global training data cached on each worker rank
+# ---------------------------------------------------------------------------
 
-# --------------------------------------------------------------------------------------
-# Worker initialiser - run only once on pool creation
-# --------------------------------------------------------------------------------------
+G_MAT:   np.ndarray | None = None   # (N_train, N_poly)
+G_Y:     np.ndarray | None = None   # (N_train,)
+G_THETA: float       | None = None
+
 
 def init_worker():
-    """Executed once on each worker when the pool starts to avoid memory overflow later"""
+    """Executed once on each worker when the pool starts."""
     global G_MAT, G_Y, G_THETA
-    G_MAT = None
-    G_Y = None
+    G_MAT   = None
+    G_Y     = None
     G_THETA = None
-    # print(
-    #     f"[worker-init] Rank {MPI.COMM_WORLD.Get_rank()} initialised globals",
-    #     flush=True,
-    # )
 
-# --------------------------------------------------------------------------------------
-# Helpers executed by workers
-# --------------------------------------------------------------------------------------
 
 def update_globals(Y: np.ndarray, Mat: np.ndarray, theta: float):
     """Replace the global training data on a worker rank."""
     global G_MAT, G_Y, G_THETA
-    G_MAT = Mat  # view, not copy (already local on the worker)
-    G_Y = Y
+    G_MAT   = Mat
+    G_Y     = Y
     G_THETA = float(theta)
     return MPI.COMM_WORLD.Get_rank()
 
 
-def _solve_one(idx: np.ndarray, dist: np.ndarray, w_thresh: float = 1e-1):
-    """Weighted least squares for one query; executed inside the batch loop."""
-    wght = np.exp(-G_THETA * dist**2)
-    w_max = wght.max()
+# ---------------------------------------------------------------------------
+# Per-query solver – executed inside worker ranks
+# ---------------------------------------------------------------------------
 
-    if w_max < 1e-15:
-        return np.zeros(G_MAT.shape[1])
-
-    mask = wght >= w_thresh * w_max
-    if np.count_nonzero(mask) < G_MAT.shape[1]:
-        mask = np.ones_like(mask, dtype=bool)
-
-    Mat_red = G_MAT[idx][mask]
-    Y_red = G_Y[idx][mask]
-    w_red = wght[mask]
-
-    Matw = Mat_red * w_red[:, None]
-    Pw = Y_red * w_red
-    alpha, *_ = np.linalg.lstsq(Matw, Pw, rcond=None)
-    return alpha
-
-
-def batch_worker(
-    i_q_batch: np.ndarray,
-    idx_batch: np.ndarray,
-    dist_batch: np.ndarray,
+def _solve_one(
+    i_q:     int,
+    idx:     np.ndarray,
+    dist:    np.ndarray,
     w_thresh: float = 1e-3,
 ):
-    """Executes on a worker: solves MLS for a *batch* of query indices."""
+    """Weighted least-squares MLS for a single query point.
+
+    Returns
+    -------
+    alpha     : np.ndarray, shape (Nt,)
+    fallback  : bool – True whenever a non-standard path was taken
+    fail_info : None, or dict with diagnostic data if lstsq raised LinAlgError
+    """
+    Nt    = G_MAT.shape[1]
+    wght  = np.exp(-G_THETA * dist ** 2)
+    w_max = wght.max()
+
+    # --- degenerate: all neighbours have negligible weight -------------------
+    if w_max < 1e-15:
+        # Nearest-neighbour constant: alpha[0] = Y[nn] exploits that
+        # column 0 of the polynomial basis is always 1.
+        alpha_nn    = np.zeros(Nt)
+        alpha_nn[0] = G_Y[idx[0]]
+        return alpha_nn, True, None
+
+    # --- standard mask: neighbours above the weight threshold ----------------
+    mask  = wght >= w_thresh * w_max
+    n_eff = int(np.count_nonzero(mask))
+    is_knn = n_eff < Nt          # True → too few effective neighbours
+
+    if is_knn:
+        mask = np.ones(len(idx), dtype=bool)   # use all k neighbours
+
+    Mat_red = G_MAT[idx][mask]
+    Y_red   = G_Y[idx][mask]
+    w_red   = wght[mask]
+    Matw    = Mat_red * w_red[:, None]
+    Pw      = Y_red   * w_red
+
+    # --- primary lstsq -------------------------------------------------------
+    try:
+        alpha, *_ = np.linalg.lstsq(Matw, Pw, rcond=None)
+        return alpha, is_knn, None
+
+    except np.linalg.LinAlgError as _lstsq_err:
+        # Build diagnostic record (Xi coords added by root after collection)
+        fail_info = dict(
+            i_q      = i_q,
+            n_eff    = n_eff,
+            is_knn   = is_knn,
+            nn_dist  = float(dist[0]),
+            lstsq_err= str(_lstsq_err),
+            tikh_ok  = False,
+            tikh_err = None,
+            lam      = None,
+        )
+
+        # --- Tikhonov regularisation fallback --------------------------------
+        try:
+            lam   = 1e-10 * float((Matw * Matw).sum()) / Nt
+            A     = Matw.T @ Matw + lam * np.eye(Nt)
+            alpha = np.linalg.solve(A, Matw.T @ Pw)
+            fail_info["tikh_ok"] = True
+            fail_info["lam"]     = lam
+            return alpha, True, fail_info
+
+        except (np.linalg.LinAlgError, Exception) as _tikh_err:
+            fail_info["tikh_err"] = str(_tikh_err)
+
+        # --- nearest-neighbour fallback (last resort) ------------------------
+        alpha_nn    = np.zeros(Nt)
+        alpha_nn[0] = G_Y[idx[0]]
+        return alpha_nn, True, fail_info
+
+
+# ---------------------------------------------------------------------------
+# Batch worker – dispatched to the MPI pool
+# ---------------------------------------------------------------------------
+
+def batch_worker(
+    i_q_batch:  np.ndarray,
+    idx_batch:  np.ndarray,
+    dist_batch: np.ndarray,
+    w_thresh:   float = 1e-3,
+):
+    """Solve MLS for a batch of query indices on one worker rank.
+
+    Returns
+    -------
+    out  : list of (i_q, alpha, fallback, fail_info)
+    rank : int – worker rank (for load-balance logging)
+    """
     out = []
     for local_idx, i_q in enumerate(i_q_batch):
-        alpha = _solve_one(idx_batch[local_idx], dist_batch[local_idx], w_thresh)
-        out.append((i_q, alpha))
+        alpha, fallback, fail_info = _solve_one(
+            int(i_q),
+            idx_batch[local_idx],
+            dist_batch[local_idx],
+            w_thresh,
+        )
+        out.append((i_q, alpha, fallback, fail_info))
     return out, MPI.COMM_WORLD.Get_rank()
 
 
-# --------------------------------------------------------------------------------------
-# Controller-side helpers
-# --------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Root-side helpers
+# ---------------------------------------------------------------------------
 
 def ensure_all_workers_update(
-    pool: MPIPoolExecutor, Y: np.ndarray, Mat: np.ndarray, theta: float
+    pool: MPIPoolExecutor,
+    Y:    np.ndarray,
+    Mat:  np.ndarray,
+    theta: float,
 ):
-    """Guarantee that *every* worker rank runs `update_globals`."""
+    """Guarantee that every worker rank runs ``update_globals``."""
     futures = [pool.submit(update_globals, Y, Mat, theta) for _ in range(size - 1)]
     for fut in as_completed(futures):
-        fut.result()  # re-raise errors immediately
-    # if root:
-    #     print("[root] All workers updated their training data", flush=True)
+        fut.result()
 
-# --------------------------------------------------------------------------------------
-# Other helper functions 
-# --------------------------------------------------------------------------------------
 
 def process_prediction(
-    pool: MPIPoolExecutor,
-    tasks: np.ndarray,
-    Mati: np.ndarray,
-    Xi: np.ndarray,
-    Ymin: float,
-    Yrng: float,
+    pool:            MPIPoolExecutor,
+    tasks:           np.ndarray,
+    Mati:            np.ndarray,
+    Xi:              np.ndarray,
+    Ymin:            float,
+    Yrng:            float,
     output_filename: str,
-    output_dir: str,
-    theta: float,
-    k_neighbors: int,
-    chunk_size: int = 64,
+    output_dir:      str,
+    theta:           float,
+    k_neighbors:     int,
+    chunk_size:      int   = 64,
+    w_thresh:        float = 1e-3,
+    track_flag:      bool  = False,
 ):
-    """Dispatches MLS solves to the worker pool and writes final prediction.
-    *Executed **only on the root rank***. Workers sit in the pool.
-    """
+    """Dispatch MLS solves to the worker pool and write the final prediction.
 
-    Ni, Nt = len(tasks), Mati.shape[1]
-    # print(
-    #     f"[root] process_prediction: {output_filename} with {Ni} query points",
-    #     flush=True,
-    # )
+    Executed **only on the root rank**.  Workers sit in the MPI pool server
+    loop.
+
+    When ``track_flag=True`` a companion ``<name>_mls_flag.npy`` file is
+    written (0 = full MLS, 1 = any fallback).  LinAlgError events are
+    printed immediately with per-point diagnostics and summarised in a table
+    at the end of the variable.
+    """
+    name    = output_filename.replace(".npy", "")
+    Ni      = Xi.shape[0]
+    Nt      = Mati.shape[1]
 
     placeholder = np.empty((Nt, Ni), dtype=float)
-    completed, rank_counts = 0, {}
+    flag_arr    = np.zeros(Ni, dtype=np.int8) if track_flag else None
+    fail_infos  = []      # collected from workers, Xi coords added here on root
+    rank_counts = {}
+    completed   = 0
 
-    # --- extract training arrays once (they are identical for every task) ----------
+    # --- extract training arrays (identical across all tasks) ----------------
     _, X_train, Y_train, Mat_train, _ = tasks[0]
 
-    # ---------- distribute training data to workers --------------------------------
+    # --- distribute training data to every worker ----------------------------
     ensure_all_workers_update(pool, Y_train, Mat_train, theta)
 
-    # ---------- KD-tree & neighbour search -----------------------------------------
-    tree = cKDTree(X_train)
-    dist_all, idx_all = tree.query(Xi, k=k_neighbors, workers=-1)
-    # print("[root] KD-tree neighbour search done", flush=True)
+    # --- KD-tree neighbour search (on root, workers=-1 uses all local CPUs) --
+    tree               = cKDTree(X_train)
+    dist_all, idx_all  = tree.query(Xi, k=k_neighbors, workers=-1)
 
-    # -----------------------------------------------------------------------------
-    # Fire off batches
-    # -----------------------------------------------------------------------------
-    submit_t0 = time.time()
+    # --- submit batches to the pool ------------------------------------------
     futures = []
     for start in range(0, Ni, chunk_size):
-        sli = slice(start, min(start + chunk_size, Ni))
+        sli       = slice(start, min(start + chunk_size, Ni))
         i_q_batch = np.arange(start, min(start + chunk_size, Ni))
         futures.append(
-            pool.submit(batch_worker, i_q_batch, idx_all[sli], dist_all[sli])
+            pool.submit(batch_worker, i_q_batch, idx_all[sli], dist_all[sli], w_thresh)
         )
-    # print(
-    #     f"[root] Submitted {len(futures)} batch tasks in {time.time() - submit_t0:.2f}s",
-    #     flush=True,
-    # )
 
-    # collect results
+    # --- collect results as they arrive --------------------------------------
     for fut in as_completed(futures):
         results, wrk = fut.result()
         rank_counts[wrk] = rank_counts.get(wrk, 0) + len(results)
-        for i_q, alpha in results:
+        for i_q, alpha, fallback, fail_info in results:
             placeholder[:, i_q] = alpha
+            if track_flag and fallback:
+                flag_arr[i_q] = 1
+            if fail_info is not None:
+                # Root attaches Xi coordinates for the diagnostic summary
+                fail_info["xi_coords"] = Xi[i_q].tolist()
+                # Print immediately so failures appear as they are detected
+                tikh_str = (
+                    f"Tikhonov OK (lam={fail_info['lam']:.3e})"
+                    if fail_info["tikh_ok"]
+                    else f"Tikhonov FAIL ('{fail_info['tikh_err']}') → nearest-neighbour"
+                )
+                print(
+                    f"  [LinAlgError] {name} i_q={i_q}  "
+                    f"n_eff={fail_info['n_eff']}  is_knn={fail_info['is_knn']}  "
+                    f"nn_dist={fail_info['nn_dist']:.4e}  "
+                    f"Xi={np.array2string(Xi[i_q], precision=4, suppress_small=True)}  "
+                    f"err='{fail_info['lstsq_err']}'  → {tikh_str}",
+                    flush=True,
+                )
+                fail_infos.append(fail_info)
         completed += len(results)
-        # if completed % 500 == 0:
-        #     print(
-        #         f"[root] Completed {completed}/{Ni}  rank_counts={rank_counts}",
-        #         flush=True,
-        #     )
 
-    # ----------------------------- gather & write output -------------------------
-    Mi = Mati * placeholder.T  # (Ni, Nt)
-    Yi = Mi.sum(axis=1) * Yrng + Ymin
-    # print(f"Minimum value of Yi: {np.min(Yi)}", flush=True)
+    # --- reconstruct physical prediction -------------------------------------
+    Yi = (Mati * placeholder.T).sum(axis=1) * Yrng + Ymin
     np.save(os.path.join(output_dir, output_filename), Yi)
-    # print(f"[root] Saved {output_filename} - shape {Yi.shape}", flush=True)
 
+    # --- save binary flag array ----------------------------------------------
+    if track_flag and flag_arr is not None:
+        flag_path = os.path.join(output_dir, f"{name}_mls_flag.npy")
+        np.save(flag_path, flag_arr)
+        n_flagged = int(flag_arr.sum())
+        print(
+            f"[root] {name}: flag array saved — "
+            f"{n_flagged}/{Ni} nodes flagged (0=MLS, 1=fallback)",
+            flush=True,
+        )
+
+    # --- LinAlgError summary table -------------------------------------------
+    n_linalg = len(fail_infos)
+    if n_linalg:
+        n_tikh = sum(1 for e in fail_infos if e["tikh_ok"])
+        n_nn   = n_linalg - n_tikh
+        print(
+            f"\n[root] {name}: LinAlgError summary — "
+            f"{n_linalg} failures  (Tikhonov={n_tikh} OK, NN={n_nn})",
+            flush=True,
+        )
+        hdr = (
+            f"  {'i_q':>7}  {'n_eff':>5}  {'knn':>3}  "
+            f"{'nn_dist':>9}  {'tikh':>4}  Xi (normalised)"
+        )
+        print(hdr, flush=True)
+        print("  " + "-" * (len(hdr) - 2), flush=True)
+        for e in sorted(fail_infos, key=lambda x: x["i_q"]):
+            xi_str = "  ".join(f"{v:+.3f}" for v in e["xi_coords"])
+            tikh   = "OK" if e["tikh_ok"] else "FAIL"
+            print(
+                f"  {e['i_q']:>7}  {e['n_eff']:>5}  "
+                f"{'Y' if e['is_knn'] else 'N':>3}  "
+                f"{e['nn_dist']:>9.3e}  {tikh:>4}  [{xi_str}]",
+                flush=True,
+            )
+        print(flush=True)
+
+    print(
+        f"[root] {name}: done — LinAlgError={n_linalg}  "
+        f"output range [{Yi.min():.4e}, {Yi.max():.4e}]",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main (root-only)
+# ---------------------------------------------------------------------------
 
 def main():
-    args = parse_common_args("Run MLS", MLS=True)
-    output_dir = os.path.join(args.output_dir)
+    args       = parse_common_args("Run MLS", MLS=True)
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
-    global TRANSIENT_MODE
-    TRANSIENT_MODE = args.transient
-    # print(f'k_neighbors: {args.k_neighbors}')
+
     t0 = time.time()
 
-    # --------------------------------------------------------------------------
-    # Load *.npz bundles per variable - identical structure for each.
-    # --------------------------------------------------------------------------
+    # --- load all nine task bundles ------------------------------------------
     def load(name):
         path = os.path.join(args.output_dir, f"{name}_tasks.npz")
         data = np.load(path, allow_pickle=True)
-        feature_idx = None
-        feature_names = None
-        if "feature_idx" in data.files:
-            feature_idx = data["feature_idx"].tolist()
-        if "feature_names" in data.files:
-            feature_names = data["feature_names"].tolist()
         return (
             data["tasks"],
             data["Mati"],
             data["Xi"],
             data["Ymin"].item(),
             data["Yrng"].item(),
-            feature_idx,
-            feature_names,
+            data["feature_idx"].tolist()   if "feature_idx"   in data.files else None,
+            data["feature_names"].tolist() if "feature_names" in data.files else None,
         )
 
-    dQx = load("dQx")
-    dQy = load("dQy")
-    dP = load("dP")
+    dQx    = load("dQx")
+    dQy    = load("dQy")
+    dP     = load("dP")
     taustx = load("taustx")
     tausty = load("tausty")
-    pmax = load("pmax")
-    pmin = load("pmin")
-    hmax = load("hmax")
-    hmin = load("hmin")
+    pmax   = load("pmax")
+    pmin   = load("pmin")
+    hmax   = load("hmax")
+    hmin   = load("hmin")
 
-    if root:
-        Ni = len(dQx[0])
-        Nt = dQx[1].shape[1]
-        # print(f"[root] Loaded {Ni} query points, {Nt} polynomial terms.", flush=True)
-
-    # --------------------------------------------------------------------------
-    # Root rank drives the pool; workers do *not* enter this block.
-    # --------------------------------------------------------------------------
     if root:
         with MPIPoolExecutor(initializer=init_worker) as pool:
-            for idx, (name, pack) in enumerate(
-                zip(
-                    (
-                        "dQx",
-                        "dQy",
-                        "dP",
-                        "taustx",
-                        "tausty",
-                        "pmax",
-                        "pmin",
-                        "hmax",
-                        "hmin",
-                    ),
-                    (dQx, dQy, dP, taustx, tausty, pmax, pmin, hmax, hmin),
-                )
-            ):
+            for var_idx, (name, pack) in enumerate(zip(
+                ("dQx", "dQy", "dP", "taustx", "tausty", "pmax", "pmin", "hmax", "hmin"),
+                (dQx, dQy, dP, taustx, tausty, pmax, pmin, hmax, hmin),
+            )):
                 tasks, Mati, Xi, Ymin, Yrng, feature_idx, feature_names = pack
-                if feature_idx is not None and feature_names is not None:
-                    selected = [feature_names[i] for i in feature_idx]
-                    # print(
-                    #     f"[root] ==== {name} features: {selected}",
-                    #     flush=True,
-                    # )
-                # print(
-                #     f"[root] ==== {name} === (theta={MLS_THETA[idx]}, degree={MLS_DEGREE[idx]})",
-                #     flush=True,
-                # )
                 t_var = time.time()
                 process_prediction(
                     pool,
@@ -280,18 +381,21 @@ def main():
                     Yrng,
                     f"{name}.npy",
                     args.output_dir,
-                    MLS_THETA[idx],
-                    k_neighbors=args.k_neighbors,
-                    chunk_size=args.chunk_size,
+                    MLS_THETA[var_idx],
+                    k_neighbors = args.k_neighbors,
+                    chunk_size  = args.chunk_size,
+                    w_thresh    = args.w_thresh,
+                    track_flag  = (name in TRACK_FLAG),
                 )
-                # print(f"[root] {name} done in {time.time() - t_var:.2f}s", flush=True)
+                print(f"[root] {name} finished in {time.time() - t_var:.2f}s", flush=True)
 
         print(f"[root] MLS evaluations finished in {time.time() - t0:.2f}s", flush=True)
+
     else:
-        # Worker ranks idle here; the MPIPool server loop is already running inside
+        # Worker ranks idle here; the MPIPool server loop runs inside
         # mpi4py.futures runtime.
         while True:
-            time.sleep(3600)  # effectively wait forever; Ctrl+C / MPI abort ends run
+            time.sleep(3600)
 
 
 if __name__ == "__main__":

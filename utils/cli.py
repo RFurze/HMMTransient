@@ -57,4 +57,16 @@ def parse_common_args(description: str, with_time: bool = False, MLS: bool = Fal
             default=64,
             help="How many query points a worker solves at once",
         )
+        parser.add_argument(
+            "--w_thresh",
+            type=float,
+            default=1e-3,
+            help=(
+                "Weight-fraction threshold for effective neighbours. "
+                "A neighbour j is considered effective if "
+                "exp(-theta*d_j^2) >= w_thresh * exp(-theta*d_min^2). "
+                "If fewer than Nt neighbours pass this test the solve falls "
+                "back to all k neighbours (k-NN mode). Default: 1e-3."
+            ),
+        )
     return parser.parse_args()

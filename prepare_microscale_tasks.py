@@ -40,15 +40,15 @@ def main():
         existing_file = "transient_existing_xi_d.npy"
         state_file = "transient_sampling_state.npy"
         init_cond = not os.path.exists(os.path.join(output_dir, existing_file))
-        print(
-            f"Starting build_task_list.py for T = {T}, lb_iter={lb_iter}, c_iter={c_iter}"
-        )
+        # print(
+        #     f"Starting build_task_list.py for T = {T}, lb_iter={lb_iter}, c_iter={c_iter}"
+        # )
     else:
         from coupling.src.functions.coupling_classes import MetaModel3 as MetaModel
 
         existing_file = "existing_xi_d.npy"
         init_cond = c_iter == 1 and lb_iter == 1
-        print(f"Starting build_task_list.py for lb_iter={lb_iter}, c_iter={c_iter}")
+        # print(f"Starting build_task_list.py for lb_iter={lb_iter}, c_iter={c_iter}")
 
     theta, degree = None, None
     order = None
@@ -79,7 +79,7 @@ def main():
 
     existing_xi_d_file = os.path.join(output_dir, existing_file)
     np.save(existing_xi_d_file, existing_xi_d)
-    print(f"Saved existing_xi_d to {existing_xi_d_file}")
+    # print(f"Saved existing_xi_d to {existing_xi_d_file}")
 
     tasks_file = os.path.join(output_dir, "tasks.npy")
     np.save(tasks_file, np.array(tasks, dtype=object))
@@ -87,7 +87,7 @@ def main():
 
     xi_d_file = os.path.join(output_dir, "xi_d.npy")
     np.save(xi_d_file, xi_d)
-    print(f"Saved xi_d to {xi_d_file}")
+    # print(f"Saved xi_d to {xi_d_file}")
 
     print("build_task_list.py completed successfully.")
 

@@ -996,12 +996,14 @@ class MicroMixedSolver:
         # (Downstream code expects two components.)
         Ux_surf = 2.0 * self.params.Ux
         Uy_surf = 2.0 * self.params.Uy
-        eta0 = self.params.eta0
+
+        gradP_dim = gradP_nd * self.p_scale * self.invLx
+        eta_dim = self.roelands_eta_dim(Pfull)
 
         # Avoid division by zero via a tiny floor in the denominator.
         H_floor = Hfull + Constant(1e-30)
-        tau_x_field = Constant(eta0 * Ux_surf) / H_floor
-        tau_y_field = Constant(eta0 * Uy_surf) / H_floor
+        tau_x_field = (eta_dim * Constant(Ux_surf) / H_floor) + (Hfull / 2) * gradP_dim[0]
+        tau_y_field = (eta_dim * Constant(Uy_surf) / H_floor) + (Hfull / 2) * gradP_dim[1]
 
         taust_x = float(assemble(tau_x_field * dx(domain=self.mesh_m)) / area_total)
         taust_y = float(assemble(tau_y_field * dx(domain=self.mesh_m)) / area_total)
