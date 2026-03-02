@@ -319,53 +319,101 @@ while (( $(awk -v t="$T" -v tend="$TEND" 'BEGIN{print (t<=tend)}') )); do
             echo "   Coupling NOT converged after iteration ${c_iter} (error=$c_err)."
 
             if (( $(awk -v t="$T" 'BEGIN{print (t >= 0)}') )); then
-                #--------------------------------------------------------#
-                # STEP 1.1: Downsample and build microscale task list (serial)
-                #--------------------------------------------------------#
-                echo "[STEP 1.1] Downsample and build microscale task list (serial)"
-                run_step "prepare_microscale_tasks.py" python3 prepare_microscale_tasks.py \
-                    --transient \
-                    --lb_iter ${lb_iter} \
-                    --c_iter ${c_iter} \
-                    --Time $T \
-                    --DT $DT \
-                    --output_dir "$OUTPUT_DIR"
+                #============================================================#
+                # EDAS Refinement Loop
+                #
+                # Instead of a single pass through downsample → micro → MLS,
+                # we iterate up to EDAS_MAX_REFINE passes.  After each pass
+                # the MLS error indicator is checked; if the maximum pointwise
+                # error is below EDAS_ERROR_TARGET the loop exits early.
+                # A cumulative budget counter prevents runaway microscale sims.
+                #============================================================#
+                edas_budget_used=0
+                refine_iter=0
 
-                #--------------------------------------------------------#
-                # STEP 1.2: Microscale simulations (parallel)
-                # --oversubscribe is used on openmpi (like uni system)
-                #--------------------------------------------------------#
-                echo "   [STEP 1.2] Run microscale sims (parallel)"
-                # run_step "run_microscale.py" mpiexec -np 12 python3 -m mpi4py.futures run_microscale.py \
-                run_step "run_microscale.py" python3 run_microscale.py \
-                    --transient \
-                    --lb_iter ${lb_iter} \
-                    --c_iter ${c_iter} \
-                    --Time $T \
-                    --DT $DT \
-                    --output_dir "$OUTPUT_DIR"
+                while [ $refine_iter -lt $EDAS_MAX_REFINE ]; do
+                    echo "      ---- EDAS refinement pass ${refine_iter} ----"
 
-                #--------------------------------------------------------#
-                # STEP 1.3: Update metamodel (serial)
-                #--------------------------------------------------------#
-                echo "   [STEP 1.3] Update metamodel (serial)"
-                run_step "generate_MLS_tasks.py" python3 generate_MLS_tasks.py \
-                    --transient \
-                    --lb_iter ${lb_iter} \
-                    --c_iter ${c_iter} \
-                    --Time $T \
-                    --DT $DT \
-                    --output_dir "$OUTPUT_DIR"
+                    #--------------------------------------------------------#
+                    # STEP 1.1: EDAS sample selection (serial)
+                    #--------------------------------------------------------#
+                    echo "      [STEP 1.1] EDAS sample selection (serial)"
+                    run_step "prepare_microscale_tasks.py" python3 prepare_microscale_tasks.py \
+                        --transient \
+                        --lb_iter ${lb_iter} \
+                        --c_iter ${c_iter} \
+                        --Time $T \
+                        --DT $DT \
+                        --output_dir "$OUTPUT_DIR"
 
-                #--------------------------------------------------------#
-                # STEP 1.4: Run MLS evaluations (parallel)
-                #--------------------------------------------------------#
-                echo "   [STEP 1.4] Run MLS evaluations (parallel)"
-                run_step "run_MLS.py" mpiexec -np 12 python3 -m mpi4py.futures run_MLS.py \
-                    --transient \
-                    --lb_iter ${lb_iter} \
-                    --c_iter ${c_iter} \
-                    --output_dir "$OUTPUT_DIR"
+                    # Read how many tasks were selected
+                    n_tasks=$(tail -n 1 "${OUTPUT_DIR}/task_count.txt")
+                    if [ -z "$n_tasks" ] || [ "$n_tasks" -eq 0 ]; then
+                        echo "      EDAS: no new tasks selected — exiting refinement loop."
+                        break
+                    fi
+                    edas_budget_used=$((edas_budget_used + n_tasks))
+                    echo "      EDAS: ${n_tasks} new tasks (budget used: ${edas_budget_used}/${EDAS_MAX_BUDGET})"
+
+                    #--------------------------------------------------------#
+                    # STEP 1.2: Microscale simulations (parallel)
+                    #--------------------------------------------------------#
+                    echo "      [STEP 1.2] Run microscale sims (parallel)"
+                    run_step "run_microscale.py" python3 run_microscale.py \
+                        --transient \
+                        --lb_iter ${lb_iter} \
+                        --c_iter ${c_iter} \
+                        --Time $T \
+                        --DT $DT \
+                        --output_dir "$OUTPUT_DIR"
+
+                    #--------------------------------------------------------#
+                    # STEP 1.3: Update metamodel (serial)
+                    #--------------------------------------------------------#
+                    echo "      [STEP 1.3] Update metamodel (serial)"
+                    run_step "generate_MLS_tasks.py" python3 generate_MLS_tasks.py \
+                        --transient \
+                        --lb_iter ${lb_iter} \
+                        --c_iter ${c_iter} \
+                        --Time $T \
+                        --DT $DT \
+                        --output_dir "$OUTPUT_DIR"
+
+                    #--------------------------------------------------------#
+                    # STEP 1.4: Run MLS evaluations + error indicators (parallel)
+                    #--------------------------------------------------------#
+                    echo "      [STEP 1.4] Run MLS evaluations (parallel)"
+                    run_step "run_MLS.py" mpiexec -np 12 python3 -m mpi4py.futures run_MLS.py \
+                        --transient \
+                        --lb_iter ${lb_iter} \
+                        --c_iter ${c_iter} \
+                        --output_dir "$OUTPUT_DIR"
+
+                    #--------------------------------------------------------#
+                    # STEP 1.5: Check EDAS error target
+                    #--------------------------------------------------------#
+                    if [ -f "${OUTPUT_DIR}/mls_max_error.txt" ]; then
+                        mls_max_err=$(head -n 1 "${OUTPUT_DIR}/mls_max_error.txt")
+                        echo "      EDAS: max pointwise error = ${mls_max_err} (target: ${EDAS_ERROR_TARGET})"
+
+                        if python3 -c "import sys; sys.exit(0) if float('$mls_max_err') < float('$EDAS_ERROR_TARGET') else sys.exit(1)"; then
+                            echo "      EDAS: error target met — exiting refinement loop."
+                            break
+                        fi
+                    else
+                        echo "      EDAS: no error file found — continuing refinement."
+                    fi
+
+                    # Check budget
+                    if [ $edas_budget_used -ge $EDAS_MAX_BUDGET ]; then
+                        echo "      EDAS: budget exhausted (${edas_budget_used}/${EDAS_MAX_BUDGET}) — exiting refinement loop."
+                        break
+                    fi
+
+                    refine_iter=$((refine_iter + 1))
+                done  # End EDAS refinement loop
+
+                echo "      EDAS: completed ${refine_iter} refinement pass(es), ${edas_budget_used} total micro sims."
             fi
 
             c_iter=$((c_iter + 1))

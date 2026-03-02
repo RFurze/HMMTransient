@@ -170,3 +170,21 @@ MLS_DEGREE = np.array([2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
 # Coupling defaults
 ND_FACTOR = 0.75
 RO_THETA = 20
+
+# ------------------------------------------------------------------
+# EDAS (Error-Driven Adaptive Sampling) parameters — transient only
+# ------------------------------------------------------------------
+from config.dataclasses import EDASSettings
+
+edas = EDASSettings(
+    batch_size=200,          # micro sims per refinement pass
+    max_budget=1000,         # total micro sim budget per coupling iteration
+    max_refine_passes=3,     # refinement sub-iterations within one coupling iter
+    error_target=0.05,       # stop refining when max pointwise error < this
+    alpha_blend=0.5,         # blend weight: coverage (1) vs prediction error (0)
+    delta_min_quantile=0.1,  # quantile of 1-NN distance for minimum spacing
+    lambda_decay=2.0,        # time-decay rate for relevance weighting
+    sigma_spatial=0.3,       # spatial relevance lengthscale (normalised space)
+    relevance_prune_threshold=0.01,  # prune training points below this weight
+    r0_quantile=0.25,        # 1-NN quantile for cold-start coverage radius
+)

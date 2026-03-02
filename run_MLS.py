@@ -13,6 +13,11 @@ flag array ``<name>_mls_flag.npy`` is also written:
     1 → any fallback was used (k-NN, Tikhonov regularisation, or
         nearest-neighbour constant)
 
+When running in ``--transient`` mode the script also computes a composite
+error indicator per macroscale node (combining coverage distance and
+per-point LOOCV estimates) and saves it to ``mls_error_indicators.npy``
+and ``mls_max_error.txt`` for use by the EDAS refinement loop.
+
 When ``np.linalg.lstsq`` raises ``LinAlgError`` (the SVD did not converge),
 the solve is retried with Tikhonov regularisation.  If that also fails the
 nearest-neighbour training value is substituted.  In all non-standard cases
@@ -97,8 +102,6 @@ def _solve_one(
 
     # --- degenerate: all neighbours have negligible weight -------------------
     if w_max < 1e-15:
-        # Nearest-neighbour constant: alpha[0] = Y[nn] exploits that
-        # column 0 of the polynomial basis is always 1.
         alpha_nn    = np.zeros(Nt)
         alpha_nn[0] = G_Y[idx[0]]
         return alpha_nn, True, None
@@ -123,7 +126,6 @@ def _solve_one(
         return alpha, is_knn, None
 
     except np.linalg.LinAlgError as _lstsq_err:
-        # Build diagnostic record (Xi coords added by root after collection)
         fail_info = dict(
             i_q      = i_q,
             n_eff    = n_eff,
@@ -163,13 +165,7 @@ def batch_worker(
     dist_batch: np.ndarray,
     w_thresh:   float = 1e-3,
 ):
-    """Solve MLS for a batch of query indices on one worker rank.
-
-    Returns
-    -------
-    out  : list of (i_q, alpha, fallback, fail_info)
-    rank : int – worker rank (for load-balance logging)
-    """
+    """Solve MLS for a batch of query indices on one worker rank."""
     out = []
     for local_idx, i_q in enumerate(i_q_batch):
         alpha, fallback, fail_info = _solve_one(
@@ -213,23 +209,14 @@ def process_prediction(
     w_thresh:        float = 1e-3,
     track_flag:      bool  = False,
 ):
-    """Dispatch MLS solves to the worker pool and write the final prediction.
-
-    Executed **only on the root rank**.  Workers sit in the MPI pool server
-    loop.
-
-    When ``track_flag=True`` a companion ``<name>_mls_flag.npy`` file is
-    written (0 = full MLS, 1 = any fallback).  LinAlgError events are
-    printed immediately with per-point diagnostics and summarised in a table
-    at the end of the variable.
-    """
+    """Dispatch MLS solves to the worker pool and write the final prediction."""
     name    = output_filename.replace(".npy", "")
     Ni      = Xi.shape[0]
     Nt      = Mati.shape[1]
 
     placeholder = np.empty((Nt, Ni), dtype=float)
     flag_arr    = np.zeros(Ni, dtype=np.int8) if track_flag else None
-    fail_infos  = []      # collected from workers, Xi coords added here on root
+    fail_infos  = []
     rank_counts = {}
     completed   = 0
 
@@ -261,9 +248,7 @@ def process_prediction(
             if track_flag and fallback:
                 flag_arr[i_q] = 1
             if fail_info is not None:
-                # Root attaches Xi coordinates for the diagnostic summary
                 fail_info["xi_coords"] = Xi[i_q].tolist()
-                # Print immediately so failures appear as they are detected
                 tikh_str = (
                     f"Tikhonov OK (lam={fail_info['lam']:.3e})"
                     if fail_info["tikh_ok"]
@@ -328,6 +313,137 @@ def process_prediction(
         flush=True,
     )
 
+    return Yi, flag_arr
+
+
+# ---------------------------------------------------------------------------
+# EDAS error indicator computation (root only, after all MLS evaluations)
+# ---------------------------------------------------------------------------
+
+def compute_mls_error_indicators(
+    output_dir: str,
+    transient: bool,
+    predictions: dict,
+    flag_arrays: dict,
+):
+    """Compute composite per-node error indicators for the EDAS refinement loop.
+
+    Combines:
+    1. Coverage distance: normalised distance from each query point to
+       nearest training point (using EDAS shared normaliser).
+    2. MLS fallback rate: nodes where any of dP/dQx/dQy needed a fallback
+       get an elevated error.
+    3. Per-output LOO cross-validation error estimated at training points
+       and interpolated to query points.
+
+    Saves ``mls_error_indicators.npy`` (N_query,) and ``mls_max_error.txt``.
+    """
+    norm_state_file = os.path.join(output_dir, "edas_normaliser_state.npy")
+    if not os.path.exists(norm_state_file):
+        print("[EDAS] No normaliser state found — skipping error indicators.", flush=True)
+        return
+
+    normaliser_state = np.load(norm_state_file, allow_pickle=True).item()
+    rmin = normaliser_state["running_min"]
+    rmax = normaliser_state["running_max"]
+    rng = rmax - rmin
+    rng[rng < 1e-15] = 1.0
+
+    # Load training and query features
+    xi_rot = np.load(os.path.join(output_dir, "xi_rot.npy"))
+    existing_xi_d = np.load(os.path.join(output_dir, "transient_existing_xi_d.npy"))
+    rot_indices = [0, 1, 5, 6, 11, 12]
+
+    X_query_raw = np.vstack([xi_rot[i] for i in rot_indices]).T
+    X_train_raw = np.column_stack([existing_xi_d[i] for i in rot_indices])
+
+    X_query_norm = (X_query_raw - rmin) / rng
+    X_train_norm = (X_train_raw - rmin) / rng
+
+    N_query = X_query_norm.shape[0]
+    N_train = X_train_norm.shape[0]
+
+    # --- 1. Coverage component -------------------------------------------
+    if N_train > 0:
+        train_tree = cKDTree(X_train_norm)
+        d_nearest, _ = train_tree.query(X_query_norm, k=1)
+        if N_train >= 2:
+            d_train, _ = train_tree.query(X_train_norm, k=2)
+            median_spacing = float(np.median(d_train[:, 1]))
+            if median_spacing < 1e-15:
+                median_spacing = 1.0
+        else:
+            median_spacing = 1.0
+        eps_coverage = d_nearest / median_spacing
+    else:
+        eps_coverage = np.ones(N_query)
+
+    # --- 2. Fallback component -------------------------------------------
+    eps_fallback = np.zeros(N_query)
+    for name in ("dQx", "dQy", "dP"):
+        if name in flag_arrays and flag_arrays[name] is not None:
+            eps_fallback = np.maximum(eps_fallback, flag_arrays[name].astype(float))
+
+    # --- 3. LOOCV error component ----------------------------------------
+    # Use the primary outputs (dP, dQx, dQy) for LOOCV error estimation
+    eps_loocv = np.zeros(N_query)
+
+    # Load accumulated training outputs for the LOOCV
+    existing_dp_file = os.path.join(output_dir, "transient_existing_dp.npy")
+    existing_dq_file = os.path.join(output_dir, "transient_existing_dq.npy")
+
+    if (
+        N_train >= 4
+        and os.path.exists(existing_dp_file)
+        and os.path.exists(existing_dq_file)
+    ):
+        Y_dp = np.load(existing_dp_file)
+        Y_dq = np.load(existing_dq_file)
+
+        # Stack outputs: (N_train, 3) for [dP, dQx, dQy]
+        if Y_dq.ndim == 1:
+            Y_train_multi = np.column_stack([Y_dp, Y_dq])
+        else:
+            Y_train_multi = np.column_stack([Y_dp, Y_dq[:, 0], Y_dq[:, 1]])
+
+        # Make sure shapes are consistent
+        n_use = min(N_train, Y_train_multi.shape[0])
+        if n_use >= 4:
+            from coupling.src.functions.edas import compute_error_indicators
+
+            avg_theta = float(np.mean(MLS_THETA[:3]))
+            avg_degree = int(MLS_DEGREE[0])
+            eps_loocv = compute_error_indicators(
+                X_train_norm[:n_use],
+                Y_train_multi[:n_use],
+                X_query_norm,
+                theta=avg_theta,
+                degree=avg_degree,
+                k_loocv=min(30, n_use - 1),
+                alpha_blend=0.5,
+            )
+
+    # --- Composite indicator ---------------------------------------------
+    # Blend: 40% coverage + 40% LOOCV + 20% fallback flag
+    epsilon = 0.4 * eps_coverage + 0.4 * eps_loocv + 0.2 * eps_fallback
+
+    # Save indicators
+    np.save(os.path.join(output_dir, "mls_error_indicators.npy"), epsilon)
+
+    max_err = float(epsilon.max())
+    max_err_node = int(np.argmax(epsilon))
+    with open(os.path.join(output_dir, "mls_max_error.txt"), "w") as f:
+        f.write(f"{max_err:.8e}\n")
+
+    print(
+        f"[EDAS] Error indicators: max={max_err:.4e} at node {max_err_node}, "
+        f"mean={epsilon.mean():.4e}, "
+        f"coverage_max={eps_coverage.max():.4e}, "
+        f"loocv_max={eps_loocv.max():.4e}, "
+        f"fallback_count={int(eps_fallback.sum())}",
+        flush=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Main (root-only)
@@ -336,6 +452,7 @@ def process_prediction(
 def main():
     args       = parse_common_args("Run MLS", MLS=True)
     output_dir = args.output_dir
+    transient  = args.transient
     os.makedirs(output_dir, exist_ok=True)
 
     t0 = time.time()
@@ -365,6 +482,9 @@ def main():
     hmin   = load("hmin")
 
     if root:
+        predictions = {}
+        flag_arrays = {}
+
         with MPIPoolExecutor(initializer=init_worker) as pool:
             for var_idx, (name, pack) in enumerate(zip(
                 ("dQx", "dQy", "dP", "taustx", "tausty", "pmax", "pmin", "hmax", "hmin"),
@@ -372,7 +492,7 @@ def main():
             )):
                 tasks, Mati, Xi, Ymin, Yrng, feature_idx, feature_names = pack
                 t_var = time.time()
-                process_prediction(
+                Yi, flag_arr = process_prediction(
                     pool,
                     tasks,
                     Mati,
@@ -387,9 +507,24 @@ def main():
                     w_thresh    = args.w_thresh,
                     track_flag  = (name in TRACK_FLAG),
                 )
+                predictions[name] = Yi
+                if flag_arr is not None:
+                    flag_arrays[name] = flag_arr
                 print(f"[root] {name} finished in {time.time() - t_var:.2f}s", flush=True)
 
         print(f"[root] MLS evaluations finished in {time.time() - t0:.2f}s", flush=True)
+
+        # --- EDAS error indicators (transient only) --------------------------
+        if transient:
+            try:
+                compute_mls_error_indicators(
+                    output_dir, transient, predictions, flag_arrays
+                )
+            except Exception as e:
+                print(
+                    f"[EDAS] Warning: error indicator computation failed: {e}",
+                    flush=True,
+                )
 
     else:
         # Worker ranks idle here; the MPIPool server loop runs inside
