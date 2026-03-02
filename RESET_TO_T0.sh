@@ -11,7 +11,7 @@ set -euo pipefail
 #   t0                    Optional transient start time written to restart_state. Defaults to 0.0.
 
 CASE_REF="${1:-latest_case}"
-T0="${2:-${HMM_T0:-0.0}}"
+T0="${2:-${HMM_T0:-0.05}}"
 CASES_BASE_DIR="${HMM_CASES_BASE_DIR:-/data/output/cases}"
 
 if [[ "$CASES_BASE_DIR" == /data/* ]] && ! mountpoint -q /data; then

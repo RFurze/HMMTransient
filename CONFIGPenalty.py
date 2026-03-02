@@ -24,7 +24,7 @@ from config.dataclasses import (
 # Runtime configuration
 # ------------------------------------------------------------------
 runtime = RuntimeSettings(
-    OUTPUT_DIR="BaseCase250226",
+    OUTPUT_DIR="Parallel020326",
     MAX_LB_ITERS=20,
     MAX_COUPLING_ITERS=20,
     TEND=4.00,
@@ -47,11 +47,11 @@ material = MaterialParams(
     eccentricity0=[0.0, 0.0, 0.9950523437], #0.9541235992
     E=105e9,
     nu=0.3,
-    k_spring=1e16,
+    k_spring=1e20,
 )
 
 ideal_film_thickness = FilmThicknessParams(
-    Ah=2.75e-7,  # 1.25e-7,
+    Ah=0.0,  # 1.25e-7,
     kx=1,
     ky=1,
 )
@@ -103,13 +103,13 @@ solver = SolverParams(
     Rnewton_max_iterations=1000,
     Rnewton_rtol=1e-6,
     Rnewton_atol=1e-8,
-    Rnewton_relaxation_parameter=0.6,
+    Rnewton_relaxation_parameter=0.5,
     R_krylov_rtol=1e-5,
     load_balance_rtol=1e-5,
     xi=1e6,
     bc_tol=1e-4,
     Id=1,
-    Tend=3.0,
+    Tend=4.0,
     dt=0.05,
     t_export_interval=0.1,
     angular_velocity_fn=angular_velocity,
@@ -133,12 +133,12 @@ micro_physical = MicroPhysicalParams(
     beta_fraction=0.05,
     xmax=7.5e-5,
     ymax=7.5e-5,
-    k_spring=1e16,
+    k_spring=1e20,
 )
 
 micro_solver = MicroSolverSettings(
     dt=runtime.DT, #Note that this is just stupid naming - dt in micro is actually the end time
-    tsteps=8,
+    tsteps=10,
     newton_damping=1.0,
     max_iterations=200,
     error_tolerance=1e-6,
@@ -154,7 +154,7 @@ micro_solver = MicroSolverSettings(
 transient = TransientSettings(
     log_file="HMM_Transient.log",
     output_dir=Path("data/output/hmm_job"),
-    coupling_tol=1e-4,
+    coupling_tol=1e-5,
     load_balance_tol=1e-5,
     scaling_factor=1e-3,
 )
@@ -163,10 +163,10 @@ transient = TransientSettings(
 # MLS parameters
 # ------------------------------------------------------------------
 # MLS_THETA = np.array([1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000])
-MLS_THETA = np.array([5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000])
+MLS_THETA = np.array([10000, 10000, 10000, 5000, 5000, 5000, 5000, 5000, 5000, 5000])
 MLS_DEGREE = np.array([2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
 
 
 # Coupling defaults
-ND_FACTOR = 0.4
+ND_FACTOR = 0.75
 RO_THETA = 20

@@ -85,6 +85,17 @@ def _load_scalar_if_exists(path: Path) -> float | None:
 def _save_scalar(path: Path, value: float) -> None:
     np.save(path, np.array(value, dtype=float))
 
+def _read_last_value(path: Path) -> float | None:
+    """Read last scalar float from text file, returning None if unavailable."""
+    try:
+        values = read_floats(path)
+    except OSError:
+        return None
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return None
+    return float(arr[-1])
+
 def _mix(prev_used: np.ndarray | None, new: np.ndarray, omega: float) -> np.ndarray:
     """Under-relax: used = prev_used + omega*(new - prev_used). If no prev_used, use new."""
     if prev_used is None or prev_used.shape != new.shape:
@@ -180,8 +191,6 @@ def main(argv: list[str] | None = None) -> None:
         (output_dir / "d_load_balance_err.txt").write_text("1\n")
         (output_dir / "lb_eccentricities.txt").write_text(f"{last_ecc[2]:.12f}\n")
 
-    print(f"Last_ecc = {last_ecc}")
-
     # ------------------------------------------------------------------
     # Build solver with prior state data
     # ------------------------------------------------------------------
@@ -257,8 +266,6 @@ def main(argv: list[str] | None = None) -> None:
             taustx = np.zeros(n)
             tausty = np.zeros(n)
         else:
-            print("Loading correction terms...")
-
             # --- new micro corrections from this coupling iteration ---
             dQx_new = np.load(output_dir / "dQx.npy")
             dQy_new = np.load(output_dir / "dQy.npy")
@@ -379,13 +386,6 @@ def main(argv: list[str] | None = None) -> None:
             p_bounds=(pmax, pmin),
             h_bounds=(hmax, hmin),
         )
-        solver.export("dQ", tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
-        solver.export("dP", tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
-        solver.export("taust_rot", tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
-        solver.export('hmin', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
-        solver.export('hmax', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
-        solver.export('pmax', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
-        solver.export('pmin', tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
 
         # solver.solver_params.Rnewton_relaxation_parameter = 0.2
         solver.initialise_velocity()
@@ -398,7 +398,6 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"Solving HMM with eccentricity: {solver.material_properties.eccentricity0[2]:.12f}"
         )
-        # ADDED 14/01/26
         xi, load_balance_err = solver.EHL_balance_equation(
             solver.material_properties.eccentricity0[2],
             HMMState=True,
@@ -415,7 +414,6 @@ def main(argv: list[str] | None = None) -> None:
     solver.calc_gradP()
 
     xi_out = solver.construct_transient_xi(xi_rot_array, xi_last_T)
-    print(f"Shape of xi_out: {np.shape(xi_out)}")
 
     try:
         load_balance_errs = read_floats(output_dir / "d_load_balance_err.txt")
@@ -424,16 +422,32 @@ def main(argv: list[str] | None = None) -> None:
 
     last_force = read_last_force(output_dir / "forces.txt")
 
-    # Verbose diagnostics (kept from original script)
-    print(f"last_load_balance_err = {load_balance_errs[-1]}")
-    print(f"last_force = {last_force}")
-
     p_max = np.max(solver.p.vector()[:])
+    min_film_total_m = float(solver.h.vector().min() * solver.material_properties.c)
+    min_film_geom_m = solver.geometric_min_film_thickness()
     diff_z = solver.load[2] + solver.force[2]
     denom = abs(solver.load[2]) if abs(solver.load[2]) > 0 else 1.0
     load_balance_err = float(diff_z) / denom
 
-    print(f"P_max for T={T}, lb_iter={lb_iter}, c_iter={c_iter} = {p_max}")
+    prev_lb_err = _read_last_value(output_dir / "d_load_balance_err.txt")
+    prev_ecc = _read_last_value(output_dir / "lb_eccentricities.txt")
+    prev_min_film = _read_last_value(output_dir / "d_min_film_total.txt")
+
+    d_ecc = (
+        float(solver.material_properties.eccentricity0[2] - prev_ecc)
+        if prev_ecc is not None
+        else np.nan
+    )
+    d_lb_err = (
+        float(load_balance_err - prev_lb_err)
+        if prev_lb_err is not None
+        else np.nan
+    )
+    d_min_film = (
+        float(min_film_total_m - prev_min_film)
+        if prev_min_film is not None
+        else np.nan
+    )
 
     # Export for visualisation
     for field in ("p", "Q", "h"):
@@ -458,25 +472,28 @@ def main(argv: list[str] | None = None) -> None:
             p0 = xi_prev[1, :] + DT * xi_prev[12, :]
         p1 = xi_out[1, :] + DT * xi_out[12, :]
         d_coupling_err = np.linalg.norm(p1 - p0) / np.linalg.norm(p0)
-        print(
-            f"DT*xi_out[12, :] norm = {np.linalg.norm(DT * xi_out[12, :]):.12e}, p norm = {np.linalg.norm(xi_out[1, :]):.12e}"
-        )
-        print(
-            f"p0 norm = {np.linalg.norm(p0):.12e}, p1 norm = {np.linalg.norm(p1):.12e}, p1-p0 norm = {np.linalg.norm(p1 - p0):.12e}"
-        )
         np.save(p0_path, p1)
     else:
         p1 = xi_out[1, :] + DT * xi_out[12, :]
         d_coupling_err = 1
-        print(
-            f"coupling iter 1 DT*xi_out[12, :] norm = {np.linalg.norm(DT * xi_out[12, :]):.12e}, p norm = {np.linalg.norm(xi_out[1, :]):.12e}, p1 norm = {np.linalg.norm(p1):.12e}"
-        )
         np.save(output_dir / "p0.npy", p1)
 
     append_line(output_dir / "d_coupling_errs.txt", d_coupling_err)
 
     print("Coupling error = %.3e", d_coupling_err)
     print("Load balance error = %.3e", load_balance_err)
+    print(
+        "Film minima [m]: total=%0.6e, geometric=%0.6e, elastic_contrib=%0.6e",
+        min_film_total_m,
+        min_film_geom_m,
+        min_film_total_m - min_film_geom_m,
+    )
+    print(
+        "LB deltas: Δecc=%s, Δerr=%s, Δhmin_total[m]=%s",
+        f"{d_ecc:+.6e}" if np.isfinite(d_ecc) else "NA",
+        f"{d_lb_err:+.6e}" if np.isfinite(d_lb_err) else "NA",
+        f"{d_min_film:+.6e}" if np.isfinite(d_min_film) else "NA",
+    )
     print("force          : %s", solver.force)
     print("last_force     : %s", last_force)
 
@@ -484,11 +501,13 @@ def main(argv: list[str] | None = None) -> None:
     # Diagnostics
     # ------------------------------------------------------------------
     append_line(output_dir / "forces.txt", solver.force)
+    append_line(output_dir / "d_min_film_total.txt", min_film_total_m)
+    append_line(output_dir / "d_min_film_geom.txt", min_film_geom_m)
 
     # -- coupling converged -------------------------------------------
     if abs(d_coupling_err) < transient.coupling_tol:
-        for field in ("p", "Q", "h", "dQ", "dP"):
-            solver.export(field, tag="COUPLING", iter=lb_iter)
+        for field in ("p", "Q", "h", "dQ", "dP", "hmin", "hmax", "pmin", "pmax", "taust_rot"):
+            solver.export(field, tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
         print(
             "Coupling convergence achieved (%.3e) [lb_iter=%d, c_iter=%d, T=%d]",
             d_coupling_err,

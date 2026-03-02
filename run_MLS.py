@@ -24,10 +24,10 @@ from scipy.spatial import cKDTree
 rank = MPI.COMM_WORLD.Get_rank()
 size = MPI.COMM_WORLD.Get_size()
 root = rank == 0
-if root:
-    print(
-        f"[root] Master rank {rank} initialised with {size - 1} worker(s).", flush=True
-    )
+# if root:
+#     print(
+#         f"[root] Master rank {rank} initialised with {size - 1} worker(s).", flush=True
+#     )
 
 
 # Global training data cached on each worker
@@ -46,10 +46,10 @@ def init_worker():
     G_MAT = None
     G_Y = None
     G_THETA = None
-    print(
-        f"[worker-init] Rank {MPI.COMM_WORLD.Get_rank()} initialised globals",
-        flush=True,
-    )
+    # print(
+    #     f"[worker-init] Rank {MPI.COMM_WORLD.Get_rank()} initialised globals",
+    #     flush=True,
+    # )
 
 # --------------------------------------------------------------------------------------
 # Helpers executed by workers
@@ -111,8 +111,8 @@ def ensure_all_workers_update(
     futures = [pool.submit(update_globals, Y, Mat, theta) for _ in range(size - 1)]
     for fut in as_completed(futures):
         fut.result()  # re-raise errors immediately
-    if root:
-        print("[root] All workers updated their training data", flush=True)
+    # if root:
+    #     print("[root] All workers updated their training data", flush=True)
 
 # --------------------------------------------------------------------------------------
 # Other helper functions 
@@ -136,10 +136,10 @@ def process_prediction(
     """
 
     Ni, Nt = len(tasks), Mati.shape[1]
-    print(
-        f"[root] process_prediction: {output_filename} with {Ni} query points",
-        flush=True,
-    )
+    # print(
+    #     f"[root] process_prediction: {output_filename} with {Ni} query points",
+    #     flush=True,
+    # )
 
     placeholder = np.empty((Nt, Ni), dtype=float)
     completed, rank_counts = 0, {}
@@ -153,7 +153,7 @@ def process_prediction(
     # ---------- KD-tree & neighbour search -----------------------------------------
     tree = cKDTree(X_train)
     dist_all, idx_all = tree.query(Xi, k=k_neighbors, workers=-1)
-    print("[root] KD-tree neighbour search done", flush=True)
+    # print("[root] KD-tree neighbour search done", flush=True)
 
     # -----------------------------------------------------------------------------
     # Fire off batches
@@ -166,10 +166,10 @@ def process_prediction(
         futures.append(
             pool.submit(batch_worker, i_q_batch, idx_all[sli], dist_all[sli])
         )
-    print(
-        f"[root] Submitted {len(futures)} batch tasks in {time.time() - submit_t0:.2f}s",
-        flush=True,
-    )
+    # print(
+    #     f"[root] Submitted {len(futures)} batch tasks in {time.time() - submit_t0:.2f}s",
+    #     flush=True,
+    # )
 
     # collect results
     for fut in as_completed(futures):
@@ -178,18 +178,18 @@ def process_prediction(
         for i_q, alpha in results:
             placeholder[:, i_q] = alpha
         completed += len(results)
-        if completed % 500 == 0:
-            print(
-                f"[root] Completed {completed}/{Ni}  rank_counts={rank_counts}",
-                flush=True,
-            )
+        # if completed % 500 == 0:
+        #     print(
+        #         f"[root] Completed {completed}/{Ni}  rank_counts={rank_counts}",
+        #         flush=True,
+        #     )
 
     # ----------------------------- gather & write output -------------------------
     Mi = Mati * placeholder.T  # (Ni, Nt)
     Yi = Mi.sum(axis=1) * Yrng + Ymin
-    print(f"Minimum value of Yi: {np.min(Yi)}", flush=True)
+    # print(f"Minimum value of Yi: {np.min(Yi)}", flush=True)
     np.save(os.path.join(output_dir, output_filename), Yi)
-    print(f"[root] Saved {output_filename} - shape {Yi.shape}", flush=True)
+    # print(f"[root] Saved {output_filename} - shape {Yi.shape}", flush=True)
 
 
 def main():
@@ -198,7 +198,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     global TRANSIENT_MODE
     TRANSIENT_MODE = args.transient
-    print(f'k_neighbors: {args.k_neighbors}')
+    # print(f'k_neighbors: {args.k_neighbors}')
     t0 = time.time()
 
     # --------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def main():
     if root:
         Ni = len(dQx[0])
         Nt = dQx[1].shape[1]
-        print(f"[root] Loaded {Ni} query points, {Nt} polynomial terms.", flush=True)
+        # print(f"[root] Loaded {Ni} query points, {Nt} polynomial terms.", flush=True)
 
     # --------------------------------------------------------------------------
     # Root rank drives the pool; workers do *not* enter this block.
@@ -262,14 +262,14 @@ def main():
                 tasks, Mati, Xi, Ymin, Yrng, feature_idx, feature_names = pack
                 if feature_idx is not None and feature_names is not None:
                     selected = [feature_names[i] for i in feature_idx]
-                    print(
-                        f"[root] ==== {name} features: {selected}",
-                        flush=True,
-                    )
-                print(
-                    f"[root] ==== {name} === (theta={MLS_THETA[idx]}, degree={MLS_DEGREE[idx]})",
-                    flush=True,
-                )
+                    # print(
+                    #     f"[root] ==== {name} features: {selected}",
+                    #     flush=True,
+                    # )
+                # print(
+                #     f"[root] ==== {name} === (theta={MLS_THETA[idx]}, degree={MLS_DEGREE[idx]})",
+                #     flush=True,
+                # )
                 t_var = time.time()
                 process_prediction(
                     pool,
@@ -284,7 +284,7 @@ def main():
                     k_neighbors=args.k_neighbors,
                     chunk_size=args.chunk_size,
                 )
-                print(f"[root] {name} done in {time.time() - t_var:.2f}s", flush=True)
+                # print(f"[root] {name} done in {time.time() - t_var:.2f}s", flush=True)
 
         print(f"[root] MLS evaluations finished in {time.time() - t0:.2f}s", flush=True)
     else:
