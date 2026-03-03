@@ -448,8 +448,8 @@ else:
 
                     refine_iter=$((refine_iter + 1))
                 done  # End EDAS refinement loop
-                fi  # End edas_skip / refinement guard
 
+                fi  # End edas_skip / refinement guard
                 # If EDAS added new training data the MLS operator has changed.
                 # Invalidate the Aitken history so the next coupling iteration
                 # restarts with omega_init and a clean delta_km1 = None rather
@@ -459,7 +459,7 @@ else:
                           "${OUTPUT_DIR}/coupling_delta_dP.npy"
                     echo "      EDAS: Aitken history reset (${edas_budget_used} new samples added)."
                 fi
-
+                
                 echo "      EDAS: completed ${refine_iter} refinement pass(es), ${edas_budget_used} total micro sims."
             fi
 
