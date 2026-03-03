@@ -341,7 +341,7 @@ print(getattr(C.edas, 'edas_coupling_threshold', 0.0))
 " 2>/dev/null || echo "0.0")
 
                 edas_skip=false
-                if [ -n "$c_err" ] && python3 -c "
+                if [ "$c_iter" -gt 1 ] && [ -n "$c_err" ] && python3 -c "
 import sys
 thresh = float('$EDAS_COUPLING_THRESHOLD')
 if thresh > 0 and abs(float('$c_err')) > thresh:
