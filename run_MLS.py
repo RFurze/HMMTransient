@@ -59,22 +59,26 @@ TRACK_FLAG = {"dQx", "dQy", "dP"}
 G_MAT:   np.ndarray | None = None   # (N_train, N_poly)
 G_Y:     np.ndarray | None = None   # (N_train,)
 G_THETA: float       | None = None
+G_REL_W: np.ndarray | None = None   # (N_train,) relevance weights from EDAS
 
 
 def init_worker():
     """Executed once on each worker when the pool starts."""
-    global G_MAT, G_Y, G_THETA
+    global G_MAT, G_Y, G_THETA, G_REL_W
     G_MAT   = None
     G_Y     = None
     G_THETA = None
+    G_REL_W = None
 
 
-def update_globals(Y: np.ndarray, Mat: np.ndarray, theta: float):
+def update_globals(Y: np.ndarray, Mat: np.ndarray, theta: float,
+                   rel_weights: np.ndarray | None = None):
     """Replace the global training data on a worker rank."""
-    global G_MAT, G_Y, G_THETA
+    global G_MAT, G_Y, G_THETA, G_REL_W
     G_MAT   = Mat
     G_Y     = Y
     G_THETA = float(theta)
+    G_REL_W = rel_weights
     return MPI.COMM_WORLD.Get_rank()
 
 
@@ -98,6 +102,9 @@ def _solve_one(
     """
     Nt    = G_MAT.shape[1]
     wght  = np.exp(-G_THETA * dist ** 2)
+    # Apply EDAS relevance weights as multiplicative factor on Gaussian kernel
+    if G_REL_W is not None:
+        wght *= G_REL_W[idx]
     w_max = wght.max()
 
     # --- degenerate: all neighbours have negligible weight -------------------
@@ -187,9 +194,10 @@ def ensure_all_workers_update(
     Y:    np.ndarray,
     Mat:  np.ndarray,
     theta: float,
+    rel_weights: np.ndarray | None = None,
 ):
     """Guarantee that every worker rank runs ``update_globals``."""
-    futures = [pool.submit(update_globals, Y, Mat, theta) for _ in range(size - 1)]
+    futures = [pool.submit(update_globals, Y, Mat, theta, rel_weights) for _ in range(size - 1)]
     for fut in as_completed(futures):
         fut.result()
 
@@ -208,6 +216,7 @@ def process_prediction(
     chunk_size:      int   = 64,
     w_thresh:        float = 1e-3,
     track_flag:      bool  = False,
+    rel_weights:     np.ndarray | None = None,
 ):
     """Dispatch MLS solves to the worker pool and write the final prediction."""
     name    = output_filename.replace(".npy", "")
@@ -224,7 +233,7 @@ def process_prediction(
     _, X_train, Y_train, Mat_train, _ = tasks[0]
 
     # --- distribute training data to every worker ----------------------------
-    ensure_all_workers_update(pool, Y_train, Mat_train, theta)
+    ensure_all_workers_update(pool, Y_train, Mat_train, theta, rel_weights)
 
     # --- KD-tree neighbour search (on root, workers=-1 uses all local CPUs) --
     tree               = cKDTree(X_train)
@@ -485,6 +494,20 @@ def main():
         predictions = {}
         flag_arrays = {}
 
+        # Load EDAS relevance weights for transient mode
+        rel_weights = None
+        if transient:
+            rel_weights_file = os.path.join(output_dir, "edas_relevance_weights.npy")
+            if os.path.exists(rel_weights_file):
+                rel_weights = np.load(rel_weights_file)
+                print(
+                    f"[root] Loaded EDAS relevance weights: "
+                    f"shape={rel_weights.shape}, "
+                    f"range=[{rel_weights.min():.4f}, {rel_weights.max():.4f}], "
+                    f"mean={rel_weights.mean():.4f}",
+                    flush=True,
+                )
+
         with MPIPoolExecutor(initializer=init_worker) as pool:
             for var_idx, (name, pack) in enumerate(zip(
                 ("dQx", "dQy", "dP", "taustx", "tausty", "pmax", "pmin", "hmax", "hmin"),
@@ -506,6 +529,7 @@ def main():
                     chunk_size  = args.chunk_size,
                     w_thresh    = args.w_thresh,
                     track_flag  = (name in TRACK_FLAG),
+                    rel_weights = rel_weights,
                 )
                 predictions[name] = Yi
                 if flag_arr is not None:

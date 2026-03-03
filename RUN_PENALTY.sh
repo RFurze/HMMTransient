@@ -327,10 +327,38 @@ while (( $(awk -v t="$T" -v tend="$TEND" 'BEGIN{print (t<=tend)}') )); do
                 # the MLS error indicator is checked; if the maximum pointwise
                 # error is below EDAS_ERROR_TARGET the loop exits early.
                 # A cumulative budget counter prevents runaway microscale sims.
+                #
+                # EDAS phasing: if EDAS_COUPLING_THRESHOLD > 0, only run the
+                # refinement loop when coupling has partially converged.
+                # This avoids training MLS on corrections from a macroscale
+                # state that is still far from converged.
                 #============================================================#
+
+                # Read EDAS coupling threshold from config
+                EDAS_COUPLING_THRESHOLD=$(python3 -c "
+import CONFIGPenalty as C
+print(getattr(C.edas, 'edas_coupling_threshold', 0.0))
+" 2>/dev/null || echo "0.0")
+
+                edas_skip=false
+                if [ -n "$c_err" ] && python3 -c "
+import sys
+thresh = float('$EDAS_COUPLING_THRESHOLD')
+if thresh > 0 and abs(float('$c_err')) > thresh:
+    sys.exit(0)
+else:
+    sys.exit(1)
+" 2>/dev/null; then
+                    echo "      EDAS: skipping refinement (coupling_err=$c_err > threshold=$EDAS_COUPLING_THRESHOLD)"
+                    edas_skip=true
+                fi
+
                 edas_budget_used=0
                 refine_iter=0
 
+                if $edas_skip; then
+                    echo "      EDAS: refinement loop skipped (coupling not yet converged)."
+                elif [ $refine_iter -lt $EDAS_MAX_REFINE ]; then
                 while [ $refine_iter -lt $EDAS_MAX_REFINE ]; do
                     echo "      ---- EDAS refinement pass ${refine_iter} ----"
 
@@ -390,6 +418,14 @@ while (( $(awk -v t="$T" -v tend="$TEND" 'BEGIN{print (t<=tend)}') )); do
                         --output_dir "$OUTPUT_DIR"
 
                     #--------------------------------------------------------#
+                    # STEP 1.45: Live monitoring hook
+                    #--------------------------------------------------------#
+                    if [ -f "diagnostics/live_monitor_hook.sh" ]; then
+                        source diagnostics/live_monitor_hook.sh
+                        edas_monitor "$OUTPUT_DIR" "$CASE_ROOT" "$T" "$lb_iter" "$c_iter" "$refine_iter"
+                    fi
+
+                    #--------------------------------------------------------#
                     # STEP 1.5: Check EDAS error target
                     #--------------------------------------------------------#
                     if [ -f "${OUTPUT_DIR}/mls_max_error.txt" ]; then
@@ -412,6 +448,7 @@ while (( $(awk -v t="$T" -v tend="$TEND" 'BEGIN{print (t<=tend)}') )); do
 
                     refine_iter=$((refine_iter + 1))
                 done  # End EDAS refinement loop
+                fi  # End edas_skip / refinement guard
 
                 echo "      EDAS: completed ${refine_iter} refinement pass(es), ${edas_budget_used} total micro sims."
             fi

@@ -24,7 +24,7 @@ from config.dataclasses import (
 # Runtime configuration
 # ------------------------------------------------------------------
 runtime = RuntimeSettings(
-    OUTPUT_DIR="BaseCase280226",
+    OUTPUT_DIR="BaseCase020326",
     MAX_LB_ITERS=20,
     MAX_COUPLING_ITERS=20,
     TEND=4.00,
@@ -178,7 +178,8 @@ transient = TransientSettings(
 # MLS parameters
 # ------------------------------------------------------------------
 # MLS_THETA = np.array([1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000])
-MLS_THETA = np.array([10000, 10000, 10000, 5000, 5000, 5000, 5000, 5000, 5000, 5000])
+# MLS_THETA = np.array([10000, 10000, 10000, 5000, 5000, 5000, 5000, 5000, 5000, 5000])
+MLS_THETA = np.array([3000, 3000, 3000, 2000, 2000, 2000, 2000, 2000, 2000, 2000])  # softer kernel for better 6D coverage
 MLS_DEGREE = np.array([2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
 
 
@@ -192,14 +193,16 @@ RO_THETA = 20
 from config.dataclasses import EDASSettings
 
 edas = EDASSettings(
-    batch_size=200,          # micro sims per refinement pass
-    max_budget=1000,         # total micro sim budget per coupling iteration
-    max_refine_passes=3,     # refinement sub-iterations within one coupling iter
+    batch_size=200,          # micro sims per refinement pass (was 500; smaller for better error-guided placement)
+    max_budget=6000,         # total micro sim budget per coupling iteration
+    max_refine_passes=10,    # refinement sub-iterations (was 4; more passes compensate for smaller batches)
     error_target=0.05,       # stop refining when max pointwise error < this
     alpha_blend=0.5,         # blend weight: coverage (1) vs prediction error (0)
-    delta_min_quantile=0.1,  # quantile of 1-NN distance for minimum spacing
+    delta_min_quantile=0.02, # quantile of 1-NN distance for minimum spacing (was 0.1; q=0.1 wasted 47% of budget)
     lambda_decay=2.0,        # time-decay rate for relevance weighting
     sigma_spatial=0.3,       # spatial relevance lengthscale (normalised space)
     relevance_prune_threshold=0.01,  # prune training points below this weight
-    r0_quantile=0.25,        # 1-NN quantile for cold-start coverage radius
+    r0_quantile=0.15,        # 1-NN quantile for cold-start coverage radius (was 0.25; denser initial sampling)
+    coupling_decay=0.5,      # per-coupling-iteration relevance decay (0.5 = halve weight each iteration)
+    edas_coupling_threshold=0.01,  # only run EDAS refinement when coupling_error < this
 )

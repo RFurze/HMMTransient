@@ -387,6 +387,9 @@ def main(argv: list[str] | None = None) -> None:
             h_bounds=(hmax, hmin),
         )
 
+        for field in ("dQ", "dP", "hmin", "hmax", "pmin", "pmax", "taust_rot"):
+            solver.export(field, tag="COUPLING", iter=c_iter, lbiter=lb_iter, T=T)
+
         # solver.solver_params.Rnewton_relaxation_parameter = 0.2
         solver.initialise_velocity()
         solver.update_contact_separation(

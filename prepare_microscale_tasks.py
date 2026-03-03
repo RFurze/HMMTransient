@@ -66,6 +66,7 @@ def main():
                 sigma_spatial=edas_cfg.sigma_spatial,
                 relevance_prune_threshold=edas_cfg.relevance_prune_threshold,
                 r0_quantile=edas_cfg.r0_quantile,
+                coupling_decay=getattr(edas_cfg, "coupling_decay", 0.5),
             )
 
         init_cond = sampler.existing_xi_d is None or sampler.existing_xi_d.shape[1] == 0
@@ -86,10 +87,13 @@ def main():
             mls_errors=mls_errors,
             theta=avg_theta,
             degree=avg_degree,
+            coupling_iter=c_iter,
         )
 
-        # Prune stale training data
-        n_pruned = sampler.prune_training_data(T)
+        # Prune stale training data (with coupling-iteration awareness)
+        n_pruned = sampler.prune_training_data(
+            T, current_coupling_iter=c_iter,
+        )
         if n_pruned > 0:
             print(f"EDAS: pruned {n_pruned} stale training points")
 
@@ -115,6 +119,13 @@ def main():
             np.save(
                 os.path.join(output_dir, "edas_timestamps.npy"),
                 sampler.timestamps,
+            )
+
+        # Save coupling iteration tags for relevance weighting
+        if sampler.coupling_iters is not None:
+            np.save(
+                os.path.join(output_dir, "edas_coupling_iters.npy"),
+                sampler.coupling_iters,
             )
 
         # Save selected indices for diagnostics

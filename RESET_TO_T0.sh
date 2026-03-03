@@ -61,6 +61,11 @@ TRANSIENT_STATE_FILES=(
   "transient_existing_xi_d.npy"
   "transient_existing_dp.npy"
   "transient_existing_dq.npy"
+  "transient_existing_hmin.npy"
+  "transient_existing_hmax.npy"
+  "transient_existing_pmax.npy"
+  "transient_existing_pmin.npy"
+  "transient_existing_taust.npy"
 )
 
 for name in "${TRANSIENT_STATE_FILES[@]}"; do

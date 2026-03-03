@@ -183,8 +183,12 @@ def main():
 
         # Compute and save relevance weights for MLS weighting
         timestamps_file = os.path.join(output_dir, "edas_timestamps.npy")
+        coupling_iters_file = os.path.join(output_dir, "edas_coupling_iters.npy")
         if os.path.exists(timestamps_file):
             timestamps = np.load(timestamps_file)
+            coupling_iters = None
+            if os.path.exists(coupling_iters_file):
+                coupling_iters = np.load(coupling_iters_file)
             from coupling.src.functions.edas import (
                 SharedNormaliser,
                 compute_relevance_weights,
@@ -204,6 +208,9 @@ def main():
                 X_query_norm,
                 lambda_decay=sampler.lambda_decay,
                 sigma_spatial=sampler.sigma_spatial,
+                coupling_iters=coupling_iters,
+                current_coupling_iter=c_iter,
+                coupling_decay=getattr(sampler, "coupling_decay", 0.5),
             )
             np.save(os.path.join(output_dir, "edas_relevance_weights.npy"), rel_weights)
         else:
