@@ -327,10 +327,10 @@ def main(argv: list[str] | None = None) -> None:
                 hmax = hmax_new
                 hmin = hmin_new
 
-                # delta_k for next time (still store something sensible)
-                delta_k = (dP_new - dP_new)  # zeros
+                _have_delta = False
             else:
                 delta_k = (dP_new - dP_used_prev)
+                _have_delta = True
 
                 # Aitken update omega_{k+1} based on delta_k and delta_{k-1}
                 omega_next = _aitken_update_omega(
@@ -373,10 +373,18 @@ def main(argv: list[str] | None = None) -> None:
             # --- persist Aitken state for next time ---
             # store omega used and the current delta_k for dP
             _save_scalar(omega_path, omega_used)
-            np.save(delta_path, delta_k)
+            if _have_delta:
+                np.save(delta_path, delta_k)
+            else:
+                # No valid delta this iteration; remove any stale file so the next
+                # coupling solve sees delta_km1 = None and stays at omega_init.
+                try:
+                    delta_path.unlink()
+                except FileNotFoundError:
+                    pass
 
             if os.getenv("COUPLING_AITKEN_DIAG", "0") == "1":
-                n_delta = float(np.linalg.norm(delta_k.ravel()))
+                n_delta = float(np.linalg.norm(delta_k.ravel())) if _have_delta else 0.0
                 print(f"[AITKEN] omega_used={omega_used:.4f} (min={omega_min:.3f}, max={omega_max:.3f}) ||delta_dP||={n_delta:.3e}")
 
         solver.apply_corrections(
