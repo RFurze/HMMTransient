@@ -101,6 +101,8 @@ class EDASSettings:
     sigma_spatial: float = 0.3
     relevance_prune_threshold: float = 0.01
     r0_quantile: float = 0.25
+    coupling_decay: float = 0.5
+    edas_coupling_threshold: float = 0.0  # 0 = always refine; >0 = only when coupling_err < threshold
 
 
 @dataclass

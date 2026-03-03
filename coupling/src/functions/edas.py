@@ -8,10 +8,14 @@ Key ideas
 ---------
 1.  A **SharedNormaliser** ensures that feature scaling is identical in
     the sampler and in MLS, and is stable across coupling iterations.
+    For the dynamic features (Hdot, Pdot) that change between coupling
+    iterations, the normaliser is reset per time step to avoid stale
+    range dilution.
 2.  An **ErrorDrivenSampler** uses LOOCV error estimates and coverage
     distance to decide *where* new microscale simulations are needed.
-3.  Training data is relevance-weighted (time-decay + spatial proximity)
-    so that stale history fades naturally.
+3.  Training data is relevance-weighted using **coupling-iteration decay**
+    (not just time-decay) so that data with stale Hdot/Pdot values from
+    earlier coupling iterations fades quickly.
 4.  A refinement loop in the shell driver repeats sampling/MLS passes
     until the maximum pointwise error indicator drops below a target, or
     a per-iteration budget is exhausted.
@@ -27,6 +31,11 @@ from coupling.src.functions.coupling_helper_fns import build_task_list_transient
 _FEATURE_XI_INDICES = [0, 1, 5, 6, 11, 12]
 _FEATURE_NAMES = ["H", "P", "dPdx", "dPdy", "Hdot", "Pdot"]
 _N_XI_COMPONENTS = 13
+
+# Static features (don't change within a time step's coupling iterations)
+_STATIC_FEATURE_POSITIONS = [0, 1, 2, 3]   # H, P, dPdx, dPdy in the 6-feature vector
+# Dynamic features (change every coupling iteration)
+_DYNAMIC_FEATURE_POSITIONS = [4, 5]         # Hdot, Pdot in the 6-feature vector
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +89,35 @@ class SharedNormaliser:
             self.running_min = np.minimum(self.running_min, xmin)
             self.running_max = np.maximum(self.running_max, xmax)
 
+    def reset_dynamic_features(
+        self,
+        X_current: np.ndarray,
+        dynamic_positions: list[int] | None = None,
+    ) -> None:
+        """Reset normaliser bounds for dynamic features to the current data.
+
+        This prevents stale ranges from previous coupling iterations from
+        diluting the normalised space for features that change between
+        iterations (Hdot, Pdot).
+
+        Parameters
+        ----------
+        X_current : (N, D)
+            Current feature data to set dynamic bounds from.
+        dynamic_positions : list of int
+            Column indices in X_current that are dynamic.  Defaults to
+            the module-level ``_DYNAMIC_FEATURE_POSITIONS``.
+        """
+        if dynamic_positions is None:
+            dynamic_positions = _DYNAMIC_FEATURE_POSITIONS
+        if self.running_min is None or X_current.size == 0:
+            return
+        xmin = X_current.min(axis=0)
+        xmax = X_current.max(axis=0)
+        for j in dynamic_positions:
+            self.running_min[j] = xmin[j]
+            self.running_max[j] = xmax[j]
+
     def transform(self, X: np.ndarray) -> np.ndarray:
         """Scale *X* to [0, 1] using current bounds."""
         if self.running_min is None:
@@ -104,6 +142,9 @@ def compute_relevance_weights(
     query_xi_norm: np.ndarray,
     lambda_decay: float = 2.0,
     sigma_spatial: float = 0.3,
+    coupling_iters: np.ndarray | None = None,
+    current_coupling_iter: int | None = None,
+    coupling_decay: float = 0.5,
 ) -> np.ndarray:
     """Weight each training point by recency and proximity to the current
     query distribution.
@@ -122,6 +163,15 @@ def compute_relevance_weights(
         Exponential time-decay rate.
     sigma_spatial : float
         Lengthscale for spatial relevance kernel.
+    coupling_iters : (N_train,) or None
+        The coupling iteration at which each training point was created.
+        When provided, enables coupling-iteration-aware decay which is
+        critical because Hdot/Pdot change every coupling iteration.
+    current_coupling_iter : int or None
+        Current coupling iteration number.
+    coupling_decay : float
+        Per-coupling-iteration decay factor.  A point from *k* iterations
+        ago gets weight ``coupling_decay ** k``.
 
     Returns
     -------
@@ -132,6 +182,13 @@ def compute_relevance_weights(
     age = np.abs(current_time - training_timestamps)
     w_time = np.exp(-lambda_decay * age)
 
+    # Coupling-iteration decay (critical for within-timestep convergence)
+    if coupling_iters is not None and current_coupling_iter is not None:
+        iter_age = np.abs(current_coupling_iter - coupling_iters)
+        w_coupling = np.power(coupling_decay, iter_age)
+    else:
+        w_coupling = np.ones_like(w_time)
+
     # Spatial relevance: distance to nearest query point
     if query_xi_norm.shape[0] > 0 and training_xi_norm.shape[0] > 0:
         tree = cKDTree(query_xi_norm)
@@ -140,7 +197,7 @@ def compute_relevance_weights(
     else:
         w_spatial = np.ones(training_xi_norm.shape[0])
 
-    return w_time * w_spatial
+    return w_time * w_coupling * w_spatial
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +388,11 @@ def select_samples(
     selected = []
     selected_norm = []
 
+    # Build the training-set tree ONCE (previously rebuilt every candidate)
+    train_tree = None
+    if delta_min > 0 and X_train_norm is not None and X_train_norm.shape[0] > 0:
+        train_tree = cKDTree(X_train_norm)
+
     for idx in order:
         if len(selected) >= batch_size:
             break
@@ -338,9 +400,8 @@ def select_samples(
         candidate = X_query_norm[idx]
 
         # Spacing check against existing training set
-        if delta_min > 0 and X_train_norm is not None and X_train_norm.shape[0] > 0:
-            tree = cKDTree(X_train_norm)
-            d, _ = tree.query(candidate.reshape(1, -1), k=1)
+        if train_tree is not None:
+            d, _ = train_tree.query(candidate.reshape(1, -1), k=1)
             if d[0] < delta_min:
                 continue
 
@@ -424,9 +485,11 @@ class ErrorDrivenSampler:
 
     Manages:
     - A :class:`SharedNormaliser` for consistent feature scaling.
-    - Accumulated training data (``existing_xi_d``) with timestamps.
+    - Accumulated training data (``existing_xi_d``) with timestamps
+      and coupling-iteration tags.
     - Error-indicator-driven sample selection.
-    - Relevance weighting for training data pruning.
+    - Relevance weighting for training data pruning using both
+      time-decay and coupling-iteration decay.
     """
 
     def __init__(
@@ -440,6 +503,7 @@ class ErrorDrivenSampler:
         sigma_spatial: float = 0.3,
         relevance_prune_threshold: float = 0.01,
         r0_quantile: float = 0.25,
+        coupling_decay: float = 0.5,
     ):
         self.batch_size = batch_size
         self.max_budget = max_budget
@@ -450,6 +514,7 @@ class ErrorDrivenSampler:
         self.sigma_spatial = sigma_spatial
         self.relevance_prune_threshold = relevance_prune_threshold
         self.r0_quantile = r0_quantile
+        self.coupling_decay = coupling_decay
 
         self.normaliser = SharedNormaliser(len(_FEATURE_XI_INDICES))
 
@@ -457,6 +522,8 @@ class ErrorDrivenSampler:
         self.existing_xi_d: np.ndarray | None = None
         # Timestamp per training point
         self.timestamps: np.ndarray | None = None
+        # Coupling iteration per training point
+        self.coupling_iters: np.ndarray | None = None
 
     # -- persistence --------------------------------------------------------
 
@@ -465,6 +532,7 @@ class ErrorDrivenSampler:
             "normaliser": self.normaliser.get_state(),
             "existing_xi_d": self.existing_xi_d,
             "timestamps": self.timestamps,
+            "coupling_iters": self.coupling_iters,
             "batch_size": self.batch_size,
             "max_budget": self.max_budget,
             "error_target": self.error_target,
@@ -474,6 +542,7 @@ class ErrorDrivenSampler:
             "sigma_spatial": self.sigma_spatial,
             "relevance_prune_threshold": self.relevance_prune_threshold,
             "r0_quantile": self.r0_quantile,
+            "coupling_decay": self.coupling_decay,
         }
 
     @classmethod
@@ -488,10 +557,12 @@ class ErrorDrivenSampler:
             sigma_spatial=state.get("sigma_spatial", 0.3),
             relevance_prune_threshold=state.get("relevance_prune_threshold", 0.01),
             r0_quantile=state.get("r0_quantile", 0.25),
+            coupling_decay=state.get("coupling_decay", 0.5),
         )
         obj.normaliser = SharedNormaliser.from_state(state["normaliser"])
         obj.existing_xi_d = state.get("existing_xi_d")
         obj.timestamps = state.get("timestamps")
+        obj.coupling_iters = state.get("coupling_iters")
         return obj
 
     # -- helpers ------------------------------------------------------------
@@ -529,6 +600,7 @@ class ErrorDrivenSampler:
         mls_errors: np.ndarray | None = None,
         theta: float = 5000.0,
         degree: int = 2,
+        coupling_iter: int = 1,
     ):
         """Select microscale simulation points from the current macroscale state.
 
@@ -547,6 +619,9 @@ class ErrorDrivenSampler:
             MLS theta for LOOCV error estimation.
         degree : int
             MLS polynomial degree for LOOCV error estimation.
+        coupling_iter : int
+            Current coupling iteration number (for coupling-iteration
+            decay tagging).
 
         Returns
         -------
@@ -562,7 +637,11 @@ class ErrorDrivenSampler:
 
         # Extract and normalise query features
         X_query_raw = self._extract_features(xi)
+
+        # Reset dynamic feature normaliser bounds to current data to
+        # prevent stale Hdot/Pdot ranges from diluting the space.
         self.normaliser.update(X_query_raw)
+        self.normaliser.reset_dynamic_features(X_query_raw)
         X_query_norm = self.normaliser.transform(X_query_raw)
 
         if init or self.existing_xi_d is None or self.existing_xi_d.shape[1] == 0:
@@ -595,10 +674,23 @@ class ErrorDrivenSampler:
                 )
 
             delta_min = self._compute_delta_min(X_query_norm)
+
+            # Only apply spacing constraint against current-iteration
+            # training data — stale data should not block new samples
+            # from being placed where they are most needed.
+            if self.coupling_iters is not None and self.coupling_iters.size > 0:
+                current_mask = self.coupling_iters == coupling_iter
+                if current_mask.any():
+                    current_train = X_train_norm[current_mask]
+                else:
+                    current_train = None
+            else:
+                current_train = X_train_norm
+
             selected = select_samples(
                 epsilon,
                 X_query_norm,
-                X_train_norm,
+                current_train,
                 batch_size=self.batch_size,
                 delta_min=delta_min,
             )
@@ -609,17 +701,22 @@ class ErrorDrivenSampler:
                 [np.asarray(comp)[selected] for comp in xi]
             )
             new_timestamps = np.full(len(selected), current_time)
+            new_coupling_iters = np.full(len(selected), coupling_iter)
 
             # Append to accumulated training data
             if self.existing_xi_d is None or self.existing_xi_d.shape[1] == 0:
                 self.existing_xi_d = new_points
                 self.timestamps = new_timestamps
+                self.coupling_iters = new_coupling_iters
             else:
                 self.existing_xi_d = np.concatenate(
                     (self.existing_xi_d, new_points), axis=1
                 )
                 self.timestamps = np.concatenate(
                     (self.timestamps, new_timestamps)
+                )
+                self.coupling_iters = np.concatenate(
+                    (self.coupling_iters, new_coupling_iters)
                 )
 
             xi_d = [new_points[i, :] for i in range(new_points.shape[0])]
@@ -634,6 +731,7 @@ class ErrorDrivenSampler:
         self,
         current_time: float,
         query_xi_norm: np.ndarray | None = None,
+        current_coupling_iter: int | None = None,
     ) -> int:
         """Remove training points whose relevance weight has dropped below
         the threshold.  Returns the number of points pruned.
@@ -654,6 +752,9 @@ class ErrorDrivenSampler:
             query_xi_norm,
             lambda_decay=self.lambda_decay,
             sigma_spatial=self.sigma_spatial,
+            coupling_iters=self.coupling_iters,
+            current_coupling_iter=current_coupling_iter,
+            coupling_decay=self.coupling_decay,
         )
 
         keep = weights >= self.relevance_prune_threshold
@@ -662,6 +763,8 @@ class ErrorDrivenSampler:
         if n_pruned > 0:
             self.existing_xi_d = self.existing_xi_d[:, keep]
             self.timestamps = self.timestamps[keep]
+            if self.coupling_iters is not None:
+                self.coupling_iters = self.coupling_iters[keep]
 
         return n_pruned
 
@@ -678,6 +781,7 @@ class ErrorDrivenSampler:
         self,
         current_time: float,
         query_xi_norm: np.ndarray | None = None,
+        current_coupling_iter: int | None = None,
     ) -> np.ndarray:
         """Compute relevance weights for all training points."""
         if self.existing_xi_d is None or self.existing_xi_d.shape[1] == 0:
@@ -696,6 +800,9 @@ class ErrorDrivenSampler:
             query_xi_norm,
             lambda_decay=self.lambda_decay,
             sigma_spatial=self.sigma_spatial,
+            coupling_iters=self.coupling_iters,
+            current_coupling_iter=current_coupling_iter,
+            coupling_decay=self.coupling_decay,
         )
 
     def get_normaliser_state(self) -> dict:
