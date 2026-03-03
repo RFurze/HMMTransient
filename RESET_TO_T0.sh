@@ -46,6 +46,21 @@ TRANSIENT_STATE_FILES=(
   "d_friction_macro.txt"
   "lb_eccentricities.txt"
   "p0.npy"
+  # EDAS sampler / normaliser persistent state
+  "edas_state.npy"
+  "edas_normaliser_state.npy"
+  "edas_timestamps.npy"
+  "edas_selected_indices.npy"
+  "edas_relevance_weights.npy"
+  # EDAS error indicators written by run_MLS.py
+  "mls_error_indicators.npy"
+  "mls_max_error.txt"
+  # Task-count file written by prepare_microscale_tasks.py
+  "task_count.txt"
+  # Accumulated EDAS training data (transient prefix)
+  "transient_existing_xi_d.npy"
+  "transient_existing_dp.npy"
+  "transient_existing_dq.npy"
 )
 
 for name in "${TRANSIENT_STATE_FILES[@]}"; do
